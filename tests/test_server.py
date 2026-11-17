@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, patch
 
 from mcp import Client
 
-from relocation_telegram_mcp.config import ConfigurationError, Settings, hold_session_lock, load_settings
-from relocation_telegram_mcp.server import _serve, create_server
-from relocation_telegram_mcp.telegram_search import (
+from tg_mcp.config import ConfigurationError, Settings, hold_session_lock, load_settings
+from tg_mcp.server import _serve, create_server
+from tg_mcp.telegram_search import (
     MessageContext, SearchHit, SearchPage, TelegramSearch, TelegramSearchError,
 )
 
@@ -20,8 +20,8 @@ class ConfigTests(TestCase):
             config = Path(directory) / "config.toml"
             for session, chats in (
                 ("telegram.session", ""),
-                ("telegram.session", "relocation = 1234"),
-                ("../other.session", "relocation = -1234"),
+                ("telegram.session", "community = 1234"),
+                ("../other.session", "community = -1234"),
             ):
                 with self.subTest(session=session, chats=chats):
                     config.write_text(
@@ -41,7 +41,7 @@ class ServerTests(IsolatedAsyncioTestCase):
             api_id=12345,
             api_hash="test",
             session_path=Path(directory) / "test.session",
-            chats={"relocation": -1001234567890, "housing": -1009876543210},
+            chats={"community": -1001234567890, "housing": -1009876543210},
         )
         self.backend = AsyncMock(spec=TelegramSearch)
         self.server = create_server(self.settings, self.backend)
@@ -58,7 +58,7 @@ class ServerTests(IsolatedAsyncioTestCase):
                 "search_messages", {"chat": "housing", "query": " депозит "}
             )
         self.assertFalse(aliases.is_error)
-        self.assertEqual(aliases.structured_content["result"], ["housing", "relocation"])
+        self.assertEqual(aliases.structured_content["result"], ["community", "housing"])
         self.assertFalse(result.is_error)
         self.backend.search.assert_awaited_once_with(
             -1009876543210, query="депозит", author=None, since=None, until=None,
@@ -68,8 +68,8 @@ class ServerTests(IsolatedAsyncioTestCase):
     async def test_startup_failure_releases_the_session_before_opening_stdio(self) -> None:
         self.backend.start.side_effect = TelegramSearchError("Telegram session expired.")
         with (
-            patch("relocation_telegram_mcp.server.TelegramSearch", return_value=self.backend),
-            patch("relocation_telegram_mcp.server.create_server") as create,
+            patch("tg_mcp.server.TelegramSearch", return_value=self.backend),
+            patch("tg_mcp.server.create_server") as create,
             self.assertRaisesRegex(TelegramSearchError, "Telegram session expired"),
         ):
             await _serve(self.settings)
@@ -86,7 +86,7 @@ class ServerTests(IsolatedAsyncioTestCase):
             SearchPage(hits=[SearchHit(501, date, 12345, "Продолжение", None)], next_offset_id=None),
         ]
         request = {
-            "chat": "relocation",
+            "chat": "community",
             "author": 12345,
             "since": "2026-03-01T00:00:00+03:00",
             "until": "2026-04-01T00:00:00+03:00",
@@ -113,14 +113,14 @@ class ServerTests(IsolatedAsyncioTestCase):
         async with Client(self.server, read_timeout_seconds=5) as client:
             for request in (
                 {"chat": "-1001234567890", "query": "депозит"},
-                {"chat": "relocation", "query": " "},
-                {"chat": "relocation", "author": "display name"},
-                {"chat": "relocation", "author": 12345, "limit": 51},
-                {"chat": "relocation", "author": 12345, "offset_id": 0},
-                {"chat": "relocation", "author": True},
-                {"chat": "relocation", "author": 12345, "limit": True},
-                {"chat": "relocation", "author": 12345, "since": 1772323200},
-                {"chat": "relocation", "author": 12345, "since": "2026-03-01T12:00:00"},
+                {"chat": "community", "query": " "},
+                {"chat": "community", "author": "display name"},
+                {"chat": "community", "author": 12345, "limit": 51},
+                {"chat": "community", "author": 12345, "offset_id": 0},
+                {"chat": "community", "author": True},
+                {"chat": "community", "author": 12345, "limit": True},
+                {"chat": "community", "author": 12345, "since": 1772323200},
+                {"chat": "community", "author": 12345, "since": "2026-03-01T12:00:00"},
             ):
                 with self.subTest(request=request):
                     result = await client.call_tool("search_messages", request)

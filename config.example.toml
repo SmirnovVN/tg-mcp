@@ -6,4 +6,4 @@ session = "telegram.session"
 
 [chats]
 # After logging in, run tg-mcp-setup --config config.toml chats to find your IDs.
-# relocation_group = -1001234567890
+# community = -1001234567890

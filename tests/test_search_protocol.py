@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 from telethon import functions, types, utils
 
-from relocation_telegram_mcp.telegram_search import TelegramSearch, TelegramSearchError
+from tg_mcp.telegram_search import TelegramSearch, TelegramSearchError
 
 
 class SearchProtocolTests(IsolatedAsyncioTestCase):

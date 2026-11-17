@@ -1,1 +1,1 @@
-"""Search a fixed set of Telegram chats through MCP."""
+"""Compatibility for console launchers installed before the package rename."""

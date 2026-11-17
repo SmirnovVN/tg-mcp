@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "relocation-telegram-mcp"
+name = "tg-mcp"
 version = "0.1.0"
 description = "Local MCP search for an explicit list of Telegram chats."
 readme = "README.md"
@@ -11,8 +11,8 @@ requires-python = ">=3.11"
 dependencies = ["mcp==2.3.0", "pydantic==2.14.3", "Telethon==1.45.0"]
 
 [project.scripts]
-tg-mcp = "relocation_telegram_mcp.server:main"
-tg-mcp-setup = "relocation_telegram_mcp.setup_cli:main"
+tg-mcp = "tg_mcp.server:main"
+tg-mcp-setup = "tg_mcp.setup_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
