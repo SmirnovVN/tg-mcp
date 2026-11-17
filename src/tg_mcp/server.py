@@ -13,6 +13,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BeforeValidator, Field
 
 from .config import ConfigurationError, Settings, hold_session_lock, load_settings
+from .http_server import serve_http
 from .telegram_search import MessageContext, SearchHit, TelegramSearch, TelegramSearchError
 
 
@@ -136,27 +137,38 @@ def create_server(settings: Settings, search: TelegramSearch) -> MCPServer:
     return server
 
 
-async def _serve(settings: Settings) -> None:
+async def _serve(settings: Settings, transport: str = "stdio") -> None:
+    http = settings.http if transport == "streamable-http" else None
+    if transport == "streamable-http" and http is None:
+        raise ConfigurationError("Configure [http].token to use the streamable-http transport.")
     search = TelegramSearch(settings.session_path, settings.api_id, settings.api_hash)
     # Connect before the SDK opens its task group so expected startup errors reach main directly.
     with hold_session_lock(settings.session_path):
         try:
             async with asyncio.timeout(15):
                 await search.start()
-            await create_server(settings, search).run_stdio_async()
+            server = create_server(settings, search)
+            if http is None:
+                await server.run_stdio_async()
+            else:
+                await serve_http(server, http)
         finally:
             await search.close()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Serve Telegram chat search over MCP STDIO.")
+    parser = argparse.ArgumentParser(description="Serve Telegram chat search over MCP.")
     parser.add_argument("--config", required=True, type=Path, help="Path to the local TOML configuration.")
+    parser.add_argument(
+        "--transport", choices=("stdio", "streamable-http"), default="stdio",
+        help="Use STDIO or a shared local HTTP server (requires [http] settings).",
+    )
     args = parser.parse_args()
     try:
         settings = load_settings(args.config)
         if not settings.session_path.is_file():
             raise ConfigurationError("Telegram session is missing. Run tg-mcp-setup --config config.toml login.")
-        asyncio.run(_serve(settings))
+        asyncio.run(_serve(settings, args.transport))
     except (ConfigurationError, TelegramSearchError) as exc:
         parser.exit(1, f"tg-mcp: {exc}\n")
     except TimeoutError:

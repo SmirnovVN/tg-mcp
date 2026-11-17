@@ -19,8 +19,15 @@ class TelegramSettings:
 
 
 @dataclass(frozen=True)
+class HttpSettings:
+    port: int
+    token: str = field(repr=False)
+
+
+@dataclass(frozen=True)
 class Settings(TelegramSettings):
     chats: dict[str, int]
+    http: HttpSettings | None = None
 
 
 def _load_config(path: Path) -> tuple[TelegramSettings, dict]:
@@ -30,8 +37,8 @@ def _load_config(path: Path) -> tuple[TelegramSettings, dict]:
             data = tomllib.load(stream)
     except (OSError, RuntimeError, ValueError):
         raise ConfigurationError("Cannot read the local TOML configuration.") from None
-    if data.keys() - {"telegram", "chats"}:
-        raise ConfigurationError("Use only [telegram] and [chats] in the configuration.")
+    if data.keys() - {"telegram", "chats", "http"}:
+        raise ConfigurationError("Use only [telegram], [chats] and [http] in the configuration.")
 
     telegram = data.get("telegram")
     if not isinstance(telegram, dict) or telegram.keys() != {"api_id", "api_hash", "session"}:
@@ -77,7 +84,20 @@ def load_settings(path: Path) -> Settings:
         if chat_id in used_ids:
             raise ConfigurationError("Configure each Telegram chat ID only once.")
         used_ids.add(chat_id)
-    return Settings(settings.api_id, settings.api_hash, settings.session_path, chats)
+    http = _load_http_settings(data["http"]) if "http" in data else None
+    return Settings(settings.api_id, settings.api_hash, settings.session_path, chats, http)
+
+
+def _load_http_settings(http: object) -> HttpSettings:
+    if not isinstance(http, dict) or http.keys() - {"token", "port"}:
+        raise ConfigurationError("Use only token and port in [http].")
+    token = http.get("token")
+    if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,}", token):
+        raise ConfigurationError("Set [http].token to a random URL-safe token of at least 32 characters.")
+    port = http.get("port", 8765)
+    if type(port) is not int or not 1024 <= port <= 65535:
+        raise ConfigurationError("Set [http].port to an integer from 1024 to 65535.")
+    return HttpSettings(port, token)
 
 
 @contextmanager

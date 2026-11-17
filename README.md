@@ -44,6 +44,38 @@ housing = -1009876543210
 
 ## Подключение к Codex
 
+### Один сервер для нескольких чатов Codex
+
+В режиме Streamable HTTP один процесс держит Telegram-сессию, а чаты Codex подключаются к нему по одному адресу. Запросы могут выполняться одновременно. Все клиенты используют один список разрешённых Telegram-чатов.
+
+1. Закройте Codex и остановите другие запуски `tg-mcp` с этой Telegram-сессией.
+2. Сгенерируйте токен командой `.\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"`. Добавьте в файл проекта `config.toml` секцию `[http]` и вставьте сгенерированное значение в `token`.
+
+   ```toml
+   [http]
+   port = 8765
+   token = "вставьте-сгенерированный-токен"
+   ```
+
+3. Запустите сервер из папки проекта и оставьте его работать. Он слушает только `127.0.0.1` и требует токен в каждом запросе.
+
+   ```powershell
+   .\.venv\Scripts\tg-mcp.exe --config config.toml --transport streamable-http
+   ```
+
+4. В конфигурации Codex замените секцию `[mcp_servers.telegram]` целиком и запустите Codex. Используйте тот же токен и порт, что в файле проекта. [Настройки MCP в Codex](https://learn.chatgpt.com/docs/config-file/config-reference#mcp-servers)
+
+   ```toml
+   [mcp_servers.telegram]
+   url = "http://127.0.0.1:8765/mcp"
+   http_headers = { Authorization = "Bearer вставьте-сгенерированный-токен" }
+   startup_timeout_sec = 25
+   ```
+
+Чтобы подхватить новый список Telegram-чатов, перезапустите процесс сервера. Перед запуском `tg-mcp-setup` остановите его через Ctrl+C, чтобы освободить сессию.
+
+### STDIO для одного клиента
+
 В **Settings → MCP servers → Add server** выберите **STDIO** и укажите команду `C:\dev\tg-mcp\.venv\Scripts\tg-mcp.exe` с аргументами `--config` и `C:\dev\tg-mcp\config.toml`. Сохраните и перезапустите Codex. Та же настройка в `config.toml` Codex выглядит так:
 
 ```toml
