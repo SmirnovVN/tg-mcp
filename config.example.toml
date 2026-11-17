@@ -5,5 +5,5 @@ api_hash = "replace-with-your-api-hash"
 session = "telegram.session"
 
 [chats]
-# Run tg-mcp-setup chats after logging in to find the IDs for your account.
+# After logging in, run tg-mcp-setup --config config.toml chats to find your IDs.
 # relocation_group = -1001234567890

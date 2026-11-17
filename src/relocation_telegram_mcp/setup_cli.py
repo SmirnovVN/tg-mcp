@@ -1,6 +1,6 @@
 import argparse
 import asyncio
-import json
+import sqlite3
 import sys
 from getpass import getpass
 from pathlib import Path
@@ -30,18 +30,18 @@ async def _login(client: TelegramClient) -> None:
 
 async def _list_chats(client: TelegramClient) -> None:
     if not await client.is_user_authorized():
-        raise ConfigurationError("Run tg-mcp-setup login first.")
+        raise ConfigurationError("Run tg-mcp-setup --config config.toml login first.")
     print("Chat ID\tTitle")
     async for dialog in client.iter_dialogs():
         if dialog.id < 0 and (dialog.is_group or dialog.is_channel):
-            print(f"{dialog.id}\t{json.dumps(dialog.name, ensure_ascii=False)}")
+            print(f"{dialog.id}\t{dialog.name!r}")
 
 
 async def _run(settings: TelegramSettings, command: str) -> None:
     if command == "login":
         settings.session_path.parent.mkdir(parents=True, exist_ok=True)
     elif not settings.session_path.is_file():
-        raise ConfigurationError("Run tg-mcp-setup login first.")
+        raise ConfigurationError("Run tg-mcp-setup --config config.toml login first.")
     with hold_session_lock(settings.session_path):
         client = TelegramClient(
             str(settings.session_path), settings.api_id, settings.api_hash, receive_updates=False,
@@ -75,6 +75,8 @@ def main() -> None:
         parser.exit(1, "tg-mcp-setup: Incorrect login code. Run login again.\n")
     except errors.PasswordHashInvalidError:
         parser.exit(1, "tg-mcp-setup: Incorrect two-step verification password.\n")
+    except sqlite3.Error:
+        parser.exit(1, "tg-mcp-setup: Cannot read or write the Telegram session database.\n")
     except (errors.RPCError, OSError, ValueError):
         parser.exit(1, "tg-mcp-setup: Telegram setup failed. Check configuration and connection.\n")
     except (KeyboardInterrupt, EOFError):

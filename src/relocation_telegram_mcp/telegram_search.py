@@ -47,7 +47,7 @@ class TelegramSearch:
 
     async def start(self) -> None:
         if self._session_path.suffix != ".session" or not self._session_path.is_file():
-            raise TelegramSearchError("Telegram session is missing. Run tg-mcp-setup login first.")
+            raise TelegramSearchError("Telegram session is missing. Run tg-mcp-setup --config config.toml login.")
         try:
             self._client = TelegramClient(
                 str(self._session_path), self._api_id, self._api_hash,
@@ -77,7 +77,9 @@ class TelegramSearch:
             try:
                 peer = await client.get_input_entity(chat_id)
             except ValueError:
-                raise TelegramSearchError("Chat is unavailable. Run tg-mcp-setup chats to refresh its ID.") from None
+                raise TelegramSearchError(
+                    "Chat is unavailable. Run tg-mcp-setup --config config.toml chats to refresh its ID."
+                ) from None
             if not isinstance(peer, (types.InputPeerChat, types.InputPeerChannel)) or utils.get_peer_id(peer) != chat_id:
                 raise TelegramSearchError("The configured ID must resolve to the intended group or channel.")
 
@@ -86,6 +88,8 @@ class TelegramSearch:
             raise TelegramSearchError(f"Telegram asks you to wait {exc.seconds} seconds before retrying.") from None
         except (errors.ChannelPrivateError, errors.ChannelInvalidError, errors.ChatIdInvalidError):
             raise TelegramSearchError("The configured chat is unavailable to this session.") from None
+        except TimeoutError:
+            raise
         except (errors.RPCError, OSError, ValueError, sqlite3.Error):
             raise TelegramSearchError("Telegram request failed. Check chat access and the connection.") from None
 
@@ -121,18 +125,20 @@ class TelegramSearch:
 
             parent = None
             reply = anchor.reply_to
-            if isinstance(reply, types.MessageReplyHeader) and reply.reply_to_msg_id:
-                if reply.reply_to_peer_id is None or utils.get_peer_id(reply.reply_to_peer_id) == chat_id:
-                    parent = messages.get(reply.reply_to_msg_id)
-                    if parent is None:
-                        reply_rows = await _get_history(
-                            client, peer, offset_id=reply.reply_to_msg_id, add_offset=-1, limit=1,
-                        )
-                        parent = next((
-                            row for row in reply_rows
-                            if isinstance(row, types.Message) and row.id == reply.reply_to_msg_id
-                            and utils.get_peer_id(row.peer_id) == chat_id
-                        ), None)
+            if (
+                isinstance(reply, types.MessageReplyHeader) and reply.reply_to_msg_id
+                and (reply.reply_to_peer_id is None or utils.get_peer_id(reply.reply_to_peer_id) == chat_id)
+            ):
+                parent = messages.get(reply.reply_to_msg_id)
+                if parent is None:
+                    reply_rows = await _get_history(
+                        client, peer, offset_id=reply.reply_to_msg_id, add_offset=-1, limit=1,
+                    )
+                    parent = next((
+                        row for row in reply_rows
+                        if isinstance(row, types.Message) and row.id == reply.reply_to_msg_id
+                        and utils.get_peer_id(row.peer_id) == chat_id
+                    ), None)
 
             older = sorted(mid for mid in messages if mid < message_id)
             newer = sorted(mid for mid in messages if mid > message_id)
@@ -152,7 +158,7 @@ async def _get_history(
     offset_date: int | None = None,
     add_offset: int = 0,
     limit: int,
-) -> list:
+) -> list[types.TypeMessage]:
     result = await client(functions.messages.GetHistoryRequest(
         peer=peer, offset_id=offset_id, offset_date=offset_date, add_offset=add_offset,
         limit=limit, max_id=0, min_id=0, hash=0,
@@ -176,9 +182,11 @@ async def _resolve_author(
             user = await client.get_entity(author)
             if not isinstance(user, types.User):
                 raise ValueError
-            sender = utils.get_input_peer(user)
+            sender = utils.get_input_peer(user, allow_self=False)
         else:
             sender = await client.get_input_entity(types.PeerUser(author))
+            if isinstance(sender, types.InputPeerSelf):
+                sender = await client.get_me(input_peer=True)
     except (ValueError, TypeError, errors.UsernameInvalidError, errors.UsernameNotOccupiedError):
         raise TelegramSearchError("Author is unavailable. Try a current @username or a known sender_id.") from None
     if not isinstance(sender, types.InputPeerUser) or (
@@ -235,11 +243,14 @@ async def _search_pages(
             hit = _message_hit(row, peer)
             if sender is not None and hit.sender_id != sender.user_id:
                 continue
+            # IDs advance across batches, but Telegram can repeat an ID within one batch.
+            if hits and hit.message_id == hits[-1].message_id:
+                continue
             if len(hits) == limit:
                 return SearchPage(hits, hits[-1].message_id)
             hits.append(hit)
         offset = rows[-1].id
 
     # A short page can contain unavailable messages. Keep the cursor so the
-    # caller can continue without scanning without bound in one MCP call.
+    # caller can continue after this call's fixed batch budget.
     return SearchPage(hits, offset)

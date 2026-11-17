@@ -68,6 +68,35 @@ class SearchProtocolTests(IsolatedAsyncioTestCase):
         self.assertEqual([request.offset_id for request in requests], [0, 89, 70, 60])
         self.assertTrue(all(request.peer is self.peer and request.q == "депозит" for request in requests))
 
+    async def test_repeated_id_does_not_consume_a_page_slot(self) -> None:
+        self.client.side_effect = [
+            SimpleNamespace(messages=[self.message(90, 8), self.message(90, 8), self.message(80, 7)]),
+            SimpleNamespace(messages=[self.message(70, 6)]),
+        ]
+        page = await self.search.search(
+            self.chat_id, query="депозит", author=None, since=None, until=None, limit=2, offset_id=None,
+        )
+
+        self.assertEqual([hit.message_id for hit in page.hits], [90, 80])
+        self.assertEqual(page.next_offset_id, 80)
+
+    async def test_search_accepts_the_signed_in_account_as_author(self) -> None:
+        self.client.get_input_entity.side_effect = [self.peer, self.peer, types.InputPeerSelf()]
+        self.client.get_entity.return_value = types.User(
+            id=self.author.user_id, access_hash=self.author.access_hash, is_self=True,
+        )
+        self.client.get_me.return_value = self.author
+        self.client.return_value = SimpleNamespace(messages=[])
+
+        for author in ("@example", self.author.user_id):
+            await self.search.search(
+                self.chat_id, query=None, author=author, since=None, until=None, limit=2, offset_id=None,
+            )
+
+        actual = [call.args[0].from_id for call in self.client.await_args_list]
+        self.assertEqual([peer.to_dict() for peer in actual], [self.author.to_dict()] * 2)
+        self.client.get_me.assert_awaited_once_with(input_peer=True)
+
     async def test_context_keeps_nearby_messages_and_loads_distant_parent(self) -> None:
         anchor = self.message(90, 8)
         anchor.reply_to = types.MessageReplyHeader(reply_to_msg_id=20)

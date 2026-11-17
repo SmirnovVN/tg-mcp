@@ -2,13 +2,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase, TestCase
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from mcp import Client
 
-from relocation_telegram_mcp.config import ConfigurationError, Settings, load_settings
-from relocation_telegram_mcp.server import create_server
-from relocation_telegram_mcp.telegram_search import MessageContext, SearchHit, SearchPage, TelegramSearch
+from relocation_telegram_mcp.config import ConfigurationError, Settings, hold_session_lock, load_settings
+from relocation_telegram_mcp.server import _serve, create_server
+from relocation_telegram_mcp.telegram_search import (
+    MessageContext, SearchHit, SearchPage, TelegramSearch, TelegramSearchError,
+)
 
 
 class ConfigTests(TestCase):
@@ -35,14 +37,14 @@ class ServerTests(IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         project = Path(__file__).resolve().parents[1]
         directory = self.enterContext(TemporaryDirectory(dir=project))
-        settings = Settings(
+        self.settings = Settings(
             api_id=12345,
             api_hash="test",
             session_path=Path(directory) / "test.session",
             chats={"relocation": -1001234567890, "housing": -1009876543210},
         )
         self.backend = AsyncMock(spec=TelegramSearch)
-        self.server = create_server(settings, self.backend)
+        self.server = create_server(self.settings, self.backend)
 
     async def test_keyword_search_and_configured_aliases(self) -> None:
         self.backend.search.return_value = SearchPage(hits=[], next_offset_id=None)
@@ -62,7 +64,20 @@ class ServerTests(IsolatedAsyncioTestCase):
             -1009876543210, query="депозит", author=None, since=None, until=None,
             limit=20, offset_id=None,
         )
+
+    async def test_startup_failure_releases_the_session_before_opening_stdio(self) -> None:
+        self.backend.start.side_effect = TelegramSearchError("Telegram session expired.")
+        with (
+            patch("relocation_telegram_mcp.server.TelegramSearch", return_value=self.backend),
+            patch("relocation_telegram_mcp.server.create_server") as create,
+            self.assertRaisesRegex(TelegramSearchError, "Telegram session expired"),
+        ):
+            await _serve(self.settings)
+
+        create.assert_not_called()
         self.backend.close.assert_awaited_once()
+        with hold_session_lock(self.settings.session_path):
+            pass
 
     async def test_author_search_paginates_even_after_empty_page(self) -> None:
         date = datetime(2026, 3, 15, tzinfo=UTC)
@@ -102,6 +117,10 @@ class ServerTests(IsolatedAsyncioTestCase):
                 {"chat": "relocation", "author": "display name"},
                 {"chat": "relocation", "author": 12345, "limit": 51},
                 {"chat": "relocation", "author": 12345, "offset_id": 0},
+                {"chat": "relocation", "author": True},
+                {"chat": "relocation", "author": 12345, "limit": True},
+                {"chat": "relocation", "author": 12345, "since": 1772323200},
+                {"chat": "relocation", "author": 12345, "since": "2026-03-01T12:00:00"},
             ):
                 with self.subTest(request=request):
                     result = await client.call_tool("search_messages", request)
@@ -120,6 +139,7 @@ class ServerTests(IsolatedAsyncioTestCase):
                 {"chat": "unknown", "message_id": 12},
                 {"chat": "housing", "message_id": 12, "before": 21},
                 {"chat": "housing", "message_id": 0},
+                {"chat": "housing", "message_id": True},
             ):
                 result = await client.call_tool("get_message_context", request)
                 self.assertTrue(result.is_error)
