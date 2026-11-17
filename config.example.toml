@@ -1,0 +1,9 @@
+[telegram]
+# Get these at https://my.telegram.org/apps.
+api_id = 12345678
+api_hash = "replace-with-your-api-hash"
+session = "telegram.session"
+
+[chats]
+# Run tg-mcp-setup chats after logging in to find the IDs for your account.
+# relocation_group = -1001234567890
