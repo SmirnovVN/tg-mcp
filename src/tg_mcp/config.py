@@ -70,11 +70,23 @@ def load_setup_settings(path: Path) -> TelegramSettings:
     return settings
 
 
+def load_chat_export_settings(path: Path) -> tuple[TelegramSettings, dict[str, int]]:
+    settings, data = _load_config(path)
+    return settings, _load_chats(data.get("chats", {}))
+
+
 def load_settings(path: Path) -> Settings:
     settings, data = _load_config(path)
-    chats = data.get("chats")
-    if not isinstance(chats, dict) or not chats:
+    chats = _load_chats(data.get("chats", {}))
+    if not chats:
         raise ConfigurationError("Configure at least one allowed chat in [chats].")
+    http = _load_http_settings(data["http"]) if "http" in data else None
+    return Settings(settings.api_id, settings.api_hash, settings.session_path, chats, http)
+
+
+def _load_chats(chats: object) -> dict[str, int]:
+    if not isinstance(chats, dict):
+        raise ConfigurationError("Use [chats] to configure allowed chats.")
     used_ids = set()
     for alias, chat_id in chats.items():
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", alias):
@@ -84,8 +96,7 @@ def load_settings(path: Path) -> Settings:
         if chat_id in used_ids:
             raise ConfigurationError("Configure each Telegram chat ID only once.")
         used_ids.add(chat_id)
-    http = _load_http_settings(data["http"]) if "http" in data else None
-    return Settings(settings.api_id, settings.api_hash, settings.session_path, chats, http)
+    return chats
 
 
 def _load_http_settings(http: object) -> HttpSettings:

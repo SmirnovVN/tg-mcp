@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import re
 import sqlite3
 import sys
 from getpass import getpass
@@ -7,7 +8,9 @@ from pathlib import Path
 
 from telethon import TelegramClient, errors
 
-from .config import ConfigurationError, TelegramSettings, hold_session_lock, load_setup_settings
+from .config import (
+    ConfigurationError, TelegramSettings, hold_session_lock, load_chat_export_settings, load_setup_settings,
+)
 
 
 async def _login(client: TelegramClient) -> None:
@@ -28,16 +31,45 @@ async def _login(client: TelegramClient) -> None:
     print("Telegram session saved.")
 
 
-async def _list_chats(client: TelegramClient) -> None:
+async def _list_chats(client: TelegramClient, configured_chats: dict[str, int] | None = None) -> None:
     if not await client.is_user_authorized():
         raise ConfigurationError("Run tg-mcp-setup --config config.toml login first.")
-    print("Chat ID\tTitle")
-    async for dialog in client.iter_dialogs():
-        if dialog.id < 0 and (dialog.is_group or dialog.is_channel):
+    dialogs = (
+        dialog async for dialog in client.iter_dialogs()
+        if dialog.id < 0 and (dialog.is_group or dialog.is_channel)
+    )
+    if configured_chats is None:
+        print("Chat ID\tTitle")
+        async for dialog in dialogs:
             print(f"{dialog.id}\t{dialog.name!r}")
+        return
+
+    remaining = {dialog.id: dialog async for dialog in dialogs}
+    lines = ["[chats]"]
+    used_aliases = set(configured_chats)
+    for alias, chat_id in configured_chats.items():
+        dialog = remaining.pop(chat_id, None)
+        comment = f"  # {dialog.name!r}" if dialog is not None else ""
+        lines.append(f"{alias} = {chat_id}{comment}")
+
+    for chat_id, dialog in remaining.items():
+        username = getattr(dialog.entity, "username", None)
+        base = f"chat_{-chat_id}"
+        if username and re.fullmatch(r"[A-Za-z0-9_]{1,32}", username):
+            base = username.lower()
+        alias = base
+        suffix = 2
+        while alias in used_aliases:
+            alias = f"{base}_{suffix}"
+            suffix += 1
+        used_aliases.add(alias)
+        lines.append(f"{alias} = {chat_id}  # {dialog.name!r}")
+    print("\n".join(lines))
 
 
-async def _run(settings: TelegramSettings, command: str) -> None:
+async def _run(
+    settings: TelegramSettings, command: str, configured_chats: dict[str, int] | None = None,
+) -> None:
     if command == "login":
         settings.session_path.parent.mkdir(parents=True, exist_ok=True)
     elif not settings.session_path.is_file():
@@ -52,7 +84,7 @@ async def _run(settings: TelegramSettings, command: str) -> None:
             if command == "login":
                 await _login(client)
             else:
-                await _list_chats(client)
+                await _list_chats(client, configured_chats)
         finally:
             await client.disconnect()
 
@@ -61,12 +93,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Authorize a local Telegram session and choose chat IDs.")
     parser.add_argument("--config", required=True, type=Path, help="Path to the local TOML configuration.")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("login", help="Authorize the session interactively.")
-    commands.add_parser("chats", help="List your groups and channels in this terminal.")
+    commands.add_parser("login", help="Authorize the session interactively.").set_defaults(toml=False)
+    chats = commands.add_parser("chats", help="List your groups and channels in this terminal.")
+    chats.add_argument("--toml", action="store_true", help="Print a [chats] section ready to paste into the config.")
     args = parser.parse_args()
     try:
-        settings = load_setup_settings(args.config)
-        asyncio.run(_run(settings, args.command))
+        if args.toml:
+            settings, configured_chats = load_chat_export_settings(args.config)
+        else:
+            settings, configured_chats = load_setup_settings(args.config), None
+        asyncio.run(_run(settings, args.command, configured_chats))
     except ConfigurationError as exc:
         parser.exit(1, f"tg-mcp-setup: {exc}\n")
     except errors.FloodWaitError as exc:
