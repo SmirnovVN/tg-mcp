@@ -8,7 +8,7 @@ session = "telegram.session"
 # After logging in, run tg-mcp-setup --config config.toml chats to find your IDs.
 # community = -1001234567890
 
-# For a shared HTTP server, uncomment and set a token from secrets.token_urlsafe(32).
-# [http]
-# port = 8765
-# token = "replace-with-a-random-token"
+[http]
+port = 8765
+# Generate a token with secrets.token_urlsafe(32).
+token = "replace-with-a-random-token"

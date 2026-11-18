@@ -5,15 +5,56 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, patch
 
 from mcp import Client
+from telethon import types
 
-from tg_mcp.config import ConfigurationError, Settings, hold_session_lock, load_settings
-from tg_mcp.server import _serve, create_server
+from tg_mcp.config import ConfigurationError, HttpSettings, Settings, load_settings
+from tg_mcp.server import _serve, create_server, main
 from tg_mcp.telegram_search import (
-    MessageContext, SearchHit, SearchPage, TelegramSearch, TelegramSearchError,
+    MessageContext, SearchHit, SearchPage, TelegramSearch,
 )
+from tg_mcp.telegram_session import _hold_session_lock
 
 
 class ConfigTests(TestCase):
+    def test_launch_uses_http_with_config_only(self) -> None:
+        project = Path(__file__).resolve().parents[1]
+        token = "a" * 48
+        http = HttpSettings(port=8765, token=token)
+        with TemporaryDirectory(dir=project) as directory:
+            config = Path(directory) / "config.toml"
+            config.with_name("telegram.session").touch()
+            config.write_text(
+                '[telegram]\napi_id = 12345\napi_hash = "test"\nsession = "telegram.session"\n'
+                '[chats]\ncommunity = -1234\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ConfigurationError, r"\[http\]\.token"):
+                load_settings(config)
+            with config.open("a", encoding="utf-8") as stream:
+                stream.write(f'[http]\ntoken = "{token}"\n')
+
+            for extra_args in ([], ["--transport", "streamable-http"]):
+                with self.subTest(extra_args=extra_args):
+                    client = AsyncMock()
+                    client.get_me.return_value = types.User(id=12345)
+
+                    async def serve_while_locked(_server, settings: HttpSettings) -> None:
+                        self.assertEqual(settings, http)
+                        with self.assertRaisesRegex(ConfigurationError, "already in use"):
+                            with _hold_session_lock(config.with_name("telegram.session")):
+                                pass
+
+                    with (
+                        patch("sys.argv", ["tg-mcp", "--config", str(config), *extra_args]),
+                        patch("tg_mcp.telegram_session.TelegramClient", return_value=client),
+                        patch("tg_mcp.server.serve_http", side_effect=serve_while_locked) as serve,
+                    ):
+                        main()
+
+                    serve.assert_awaited_once()
+                    client.connect.assert_awaited_once()
+                    client.disconnect.assert_awaited_once()
+
     def test_only_configured_groups_with_local_session(self) -> None:
         project = Path(__file__).resolve().parents[1]
         with TemporaryDirectory(dir=project) as directory:
@@ -26,7 +67,8 @@ class ConfigTests(TestCase):
                 with self.subTest(session=session, chats=chats):
                     config.write_text(
                         f'[telegram]\napi_id = 12345\napi_hash = "example"\nsession = "{session}"\n'
-                        f'[chats]\n{chats}\n',
+                        f'[chats]\n{chats}\n'
+                        f'[http]\ntoken = "{"a" * 48}"\n',
                         encoding="utf-8",
                     )
                     with self.assertRaises(ConfigurationError):
@@ -42,9 +84,10 @@ class ServerTests(IsolatedAsyncioTestCase):
             api_hash="test",
             session_path=Path(directory) / "test.session",
             chats={"community": -1001234567890, "housing": -1009876543210},
+            http=HttpSettings(port=8765, token="a" * 48),
         )
         self.backend = AsyncMock(spec=TelegramSearch)
-        self.server = create_server(self.settings, self.backend)
+        self.server = create_server(self.settings.chats, self.backend)
 
     async def test_keyword_search_and_configured_aliases(self) -> None:
         self.backend.search.return_value = SearchPage(hits=[], next_offset_id=None)
@@ -65,18 +108,20 @@ class ServerTests(IsolatedAsyncioTestCase):
             limit=20, offset_id=None,
         )
 
-    async def test_startup_failure_releases_the_session_before_opening_stdio(self) -> None:
-        self.backend.start.side_effect = TelegramSearchError("Telegram session expired.")
+    async def test_startup_failure_releases_the_session_before_serving_http(self) -> None:
+        self.settings.session_path.touch()
+        client = AsyncMock()
+        client.get_me.return_value = None
         with (
-            patch("tg_mcp.server.TelegramSearch", return_value=self.backend),
-            patch("tg_mcp.server.create_server") as create,
-            self.assertRaisesRegex(TelegramSearchError, "Telegram session expired"),
+            patch("tg_mcp.telegram_session.TelegramClient", return_value=client),
+            patch("tg_mcp.server.serve_http") as serve,
+            self.assertRaisesRegex(ConfigurationError, "A Telegram user session is required"),
         ):
             await _serve(self.settings)
 
-        create.assert_not_called()
-        self.backend.close.assert_awaited_once()
-        with hold_session_lock(self.settings.session_path):
+        serve.assert_not_awaited()
+        client.disconnect.assert_awaited_once()
+        with _hold_session_lock(self.settings.session_path):
             pass
 
     async def test_author_search_paginates_even_after_empty_page(self) -> None:

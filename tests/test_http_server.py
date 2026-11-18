@@ -1,6 +1,5 @@
 import asyncio
 from datetime import UTC, datetime
-from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock
 
@@ -9,7 +8,7 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult
 
-from tg_mcp.config import HttpSettings, Settings
+from tg_mcp.config import HttpSettings
 from tg_mcp.http_server import create_http_app
 from tg_mcp.server import create_server
 from tg_mcp.telegram_search import SearchHit, SearchPage, TelegramSearch
@@ -21,15 +20,8 @@ class HttpServerTests(IsolatedAsyncioTestCase):
         self.url = f"http://127.0.0.1:{self.http.port}/mcp"
         self.authorization = {"Authorization": f"Bearer {self.http.token}"}
         self.chat_id = -1001234567890
-        settings = Settings(
-            api_id=12345,
-            api_hash="test",
-            session_path=Path("unused.session"),
-            chats={"community": self.chat_id},
-            http=self.http,
-        )
         self.backend = AsyncMock(spec=TelegramSearch)
-        self.app = create_http_app(create_server(settings, self.backend), self.http)
+        self.app = create_http_app(create_server({"community": self.chat_id}, self.backend), self.http)
 
     async def search(self, query: str, mode: str) -> CallToolResult:
         async with AsyncClient(

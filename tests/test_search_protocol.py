@@ -1,5 +1,4 @@
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock
@@ -16,8 +15,7 @@ class SearchProtocolTests(IsolatedAsyncioTestCase):
         self.chat_id = utils.get_peer_id(self.peer)
         self.client = AsyncMock()
         self.client.get_input_entity.side_effect = [self.peer, self.author, self.peer, self.author]
-        self.search = TelegramSearch(Path("fake.session"), 1, "test")
-        self.search._client = self.client
+        self.search = TelegramSearch(self.client)
 
     def message(self, id: int, day: int, sender_id: int = 12345) -> types.Message:
         return types.Message(

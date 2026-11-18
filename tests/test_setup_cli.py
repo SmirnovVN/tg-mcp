@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from telethon import TelegramClient
 
-from tg_mcp.config import load_settings
+from tg_mcp.config import load_setup_settings
 from tg_mcp.setup_cli import main
 
 
@@ -40,7 +40,7 @@ class SetupCliTests(TestCase):
             config.write_text(telegram + "\n[chats]\nhousing = -101\narchive = -505\n", encoding="utf-8")
             with (
                 patch("sys.argv", ["tg-mcp-setup", "--config", str(config), "chats", "--toml"]),
-                patch("tg_mcp.setup_cli.TelegramClient", return_value=client),
+                patch("tg_mcp.telegram_session.TelegramClient", return_value=client),
                 redirect_stdout(io.StringIO()) as output,
             ):
                 main()
@@ -50,4 +50,5 @@ class SetupCliTests(TestCase):
             self.assertEqual(tomllib.loads(export), expected)
             self.assertIn("# 'Housing\\n[telegram]'", export)
             config.write_text(telegram + "\n" + export, encoding="utf-8")
-            self.assertEqual(load_settings(config).chats, expected["chats"])
+            _, configured_chats = load_setup_settings(config, include_chats=True)
+            self.assertEqual(configured_chats, expected["chats"])

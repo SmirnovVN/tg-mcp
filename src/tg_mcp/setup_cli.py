@@ -8,9 +8,8 @@ from pathlib import Path
 
 from telethon import TelegramClient, errors
 
-from .config import (
-    ConfigurationError, TelegramSettings, hold_session_lock, load_chat_export_settings, load_setup_settings,
-)
+from .config import ConfigurationError, TelegramSettings, load_setup_settings
+from .telegram_session import open_session
 
 
 async def _login(client: TelegramClient) -> None:
@@ -70,23 +69,11 @@ async def _list_chats(client: TelegramClient, configured_chats: dict[str, int] |
 async def _run(
     settings: TelegramSettings, command: str, configured_chats: dict[str, int] | None = None,
 ) -> None:
-    if command == "login":
-        settings.session_path.parent.mkdir(parents=True, exist_ok=True)
-    elif not settings.session_path.is_file():
-        raise ConfigurationError("Run tg-mcp-setup --config config.toml login first.")
-    with hold_session_lock(settings.session_path):
-        client = TelegramClient(
-            str(settings.session_path), settings.api_id, settings.api_hash, receive_updates=False,
-            flood_sleep_threshold=0, connection_retries=1, request_retries=1,
-        )
-        try:
-            await client.connect()
-            if command == "login":
-                await _login(client)
-            else:
-                await _list_chats(client, configured_chats)
-        finally:
-            await client.disconnect()
+    async with open_session(settings, create=command == "login") as client:
+        if command == "login":
+            await _login(client)
+        else:
+            await _list_chats(client, configured_chats)
 
 
 def main() -> None:
@@ -98,10 +85,7 @@ def main() -> None:
     chats.add_argument("--toml", action="store_true", help="Print a [chats] section ready to paste into the config.")
     args = parser.parse_args()
     try:
-        if args.toml:
-            settings, configured_chats = load_chat_export_settings(args.config)
-        else:
-            settings, configured_chats = load_setup_settings(args.config), None
+        settings, configured_chats = load_setup_settings(args.config, include_chats=args.toml)
         asyncio.run(_run(settings, args.command, configured_chats))
     except ConfigurationError as exc:
         parser.exit(1, f"tg-mcp-setup: {exc}\n")

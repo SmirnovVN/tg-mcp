@@ -12,9 +12,10 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BeforeValidator, Field
 
-from .config import ConfigurationError, Settings, hold_session_lock, load_settings
+from .config import ConfigurationError, Settings, load_settings
 from .http_server import serve_http
 from .telegram_search import MessageContext, SearchHit, TelegramSearch, TelegramSearchError
+from .telegram_session import open_user_session
 
 
 @dataclass(frozen=True)
@@ -55,8 +56,8 @@ async def _telegram_request(timeout_message: str) -> AsyncIterator[None]:
         raise ToolError(str(exc)) from None
 
 
-def create_server(settings: Settings, search: TelegramSearch) -> MCPServer:
-    chats = dict(settings.chats)
+def create_server(chats: dict[str, int], search: TelegramSearch) -> MCPServer:
+    chats = dict(chats)
 
     def allowed_chat_id(chat: str) -> int:
         chat_id = chats.get(chat)
@@ -104,10 +105,10 @@ def create_server(settings: Settings, search: TelegramSearch) -> MCPServer:
         """
         chat_id = allowed_chat_id(chat)
 
-        query = query.strip() if query is not None else None
+        query = (query or "").strip()
         if not query and author is None:
             raise ToolError("Provide a nonblank query, an author, or both.")
-        if query and len(query) > 512:
+        if len(query) > 512:
             raise ToolError("Query must contain at most 512 characters.")
         if since is not None and until is not None and since >= until:
             raise ToolError("Since must be earlier than until.")
@@ -137,42 +138,25 @@ def create_server(settings: Settings, search: TelegramSearch) -> MCPServer:
     return server
 
 
-async def _serve(settings: Settings, transport: str = "stdio") -> None:
-    http = settings.http if transport == "streamable-http" else None
-    if transport == "streamable-http" and http is None:
-        raise ConfigurationError("Configure [http].token to use the streamable-http transport.")
-    search = TelegramSearch(settings.session_path, settings.api_id, settings.api_hash)
-    # Connect before the SDK opens its task group so expected startup errors reach main directly.
-    with hold_session_lock(settings.session_path):
-        try:
-            async with asyncio.timeout(15):
-                await search.start()
-            server = create_server(settings, search)
-            if http is None:
-                await server.run_stdio_async()
-            else:
-                await serve_http(server, http)
-        finally:
-            await search.close()
+async def _serve(settings: Settings) -> None:
+    async with open_user_session(settings) as client:
+        await serve_http(create_server(settings.chats, TelegramSearch(client)), settings.http)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Serve Telegram chat search over MCP.")
+    parser = argparse.ArgumentParser(description="Serve Telegram chat search over local Streamable HTTP.")
     parser.add_argument("--config", required=True, type=Path, help="Path to the local TOML configuration.")
-    parser.add_argument(
-        "--transport", choices=("stdio", "streamable-http"), default="stdio",
-        help="Use STDIO or a shared local HTTP server (requires [http] settings).",
-    )
+    # Accept the option used by existing HTTP launch commands.
+    parser.add_argument("--transport", choices=("streamable-http",), help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
-        settings = load_settings(args.config)
-        if not settings.session_path.is_file():
-            raise ConfigurationError("Telegram session is missing. Run tg-mcp-setup --config config.toml login.")
-        asyncio.run(_serve(settings, args.transport))
-    except (ConfigurationError, TelegramSearchError) as exc:
+        asyncio.run(_serve(load_settings(args.config)))
+    except ConfigurationError as exc:
         parser.exit(1, f"tg-mcp: {exc}\n")
     except TimeoutError:
         parser.exit(1, "tg-mcp: Telegram connection timed out.\n")
+    except KeyboardInterrupt:
+        parser.exit(130)
 
 
 if __name__ == "__main__":

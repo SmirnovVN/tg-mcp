@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from math import ceil
-from pathlib import Path
 
 from telethon import TelegramClient, errors, functions, types, utils
 
@@ -39,43 +38,14 @@ class MessageContext:
 
 
 class TelegramSearch:
-    def __init__(self, session_path: Path, api_id: int, api_hash: str) -> None:
-        self._session_path = session_path
-        self._api_id = api_id
-        self._api_hash = api_hash
-        self._client: TelegramClient | None = None
-
-    async def start(self) -> None:
-        if self._session_path.suffix != ".session" or not self._session_path.is_file():
-            raise TelegramSearchError("Telegram session is missing. Run tg-mcp-setup --config config.toml login.")
-        try:
-            self._client = TelegramClient(
-                str(self._session_path), self._api_id, self._api_hash,
-                receive_updates=False, flood_sleep_threshold=0,
-                connection_retries=1, request_retries=1, timeout=10,
-            )
-            await self._client.connect()
-            user = await self._client.get_me()
-        except errors.FloodWaitError as exc:
-            raise TelegramSearchError(f"Telegram asks you to wait {exc.seconds} seconds.") from None
-        except (errors.RPCError, OSError, sqlite3.Error, ValueError):
-            raise TelegramSearchError("Cannot open the Telegram session. Check your connection and session.") from None
-        if not isinstance(user, types.User) or user.bot:
-            raise TelegramSearchError("A Telegram user session is required. Run tg-mcp-setup login.")
-
-    async def close(self) -> None:
-        if self._client is not None:
-            await self._client.disconnect()
-            self._client = None
+    def __init__(self, client: TelegramClient) -> None:
+        self._client = client
 
     @asynccontextmanager
-    async def _open_chat(self, chat_id: int) -> AsyncIterator[tuple[TelegramClient, ChatPeer]]:
-        client = self._client
-        if client is None:
-            raise TelegramSearchError("The Telegram session is unavailable.")
+    async def _open_chat(self, chat_id: int) -> AsyncIterator[ChatPeer]:
         try:
             try:
-                peer = await client.get_input_entity(chat_id)
+                peer = await self._client.get_input_entity(chat_id)
             except ValueError:
                 raise TelegramSearchError(
                     "Chat is unavailable. Run tg-mcp-setup --config config.toml chats to refresh its ID."
@@ -83,7 +53,7 @@ class TelegramSearch:
             if not isinstance(peer, (types.InputPeerChat, types.InputPeerChannel)) or utils.get_peer_id(peer) != chat_id:
                 raise TelegramSearchError("The configured ID must resolve to the intended group or channel.")
 
-            yield client, peer
+            yield peer
         except errors.FloodWaitError as exc:
             raise TelegramSearchError(f"Telegram asks you to wait {exc.seconds} seconds before retrying.") from None
         except (errors.ChannelPrivateError, errors.ChannelInvalidError, errors.ChatIdInvalidError):
@@ -104,16 +74,16 @@ class TelegramSearch:
         limit: int,
         offset_id: int | None,
     ) -> SearchPage:
-        async with self._open_chat(chat_id) as (client, peer):
-            sender = await _resolve_author(client, author)
-            return await _search_pages(client, peer, query, sender, since, until, limit, offset_id)
+        async with self._open_chat(chat_id) as peer:
+            sender = await _resolve_author(self._client, author)
+            return await _search_pages(self._client, peer, query, sender, since, until, limit, offset_id)
 
     async def get_context(self, chat_id: int, message_id: int, *, before: int, after: int) -> MessageContext:
-        async with self._open_chat(chat_id) as (client, peer):
+        async with self._open_chat(chat_id) as peer:
             # The history offset counts the anchor itself. Move back one extra slot
             # so the window contains the anchor as well as `after` newer messages.
             rows = await _get_history(
-                client, peer, offset_id=message_id, add_offset=-(after + 1), limit=before + after + 1,
+                self._client, peer, offset_id=message_id, add_offset=-(after + 1), limit=before + after + 1,
             )
             messages = {
                 row.id: row for row in rows
@@ -132,7 +102,7 @@ class TelegramSearch:
                 parent = messages.get(reply.reply_to_msg_id)
                 if parent is None:
                     reply_rows = await _get_history(
-                        client, peer, offset_id=reply.reply_to_msg_id, add_offset=-1, limit=1,
+                        self._client, peer, offset_id=reply.reply_to_msg_id, add_offset=-1, limit=1,
                     )
                     parent = next((
                         row for row in reply_rows

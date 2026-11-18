@@ -1,14 +1,11 @@
-import os
 import re
 import tomllib
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
 
 class ConfigurationError(ValueError):
-    """A configuration problem safe to show to the caller."""
+    """A configuration or setup problem safe to show to the caller."""
 
 
 @dataclass(frozen=True)
@@ -27,10 +24,10 @@ class HttpSettings:
 @dataclass(frozen=True)
 class Settings(TelegramSettings):
     chats: dict[str, int]
-    http: HttpSettings | None = None
+    http: HttpSettings
 
 
-def _load_config(path: Path) -> tuple[TelegramSettings, dict]:
+def _load_config(path: Path) -> tuple[TelegramSettings, dict[str, object]]:
     try:
         path = path.resolve(strict=True)
         with path.open("rb") as stream:
@@ -65,14 +62,12 @@ def _load_config(path: Path) -> tuple[TelegramSettings, dict]:
     return TelegramSettings(api_id, api_hash.strip(), session_path), data
 
 
-def load_setup_settings(path: Path) -> TelegramSettings:
-    settings, _ = _load_config(path)
-    return settings
-
-
-def load_chat_export_settings(path: Path) -> tuple[TelegramSettings, dict[str, int]]:
+def load_setup_settings(
+    path: Path, *, include_chats: bool = False,
+) -> tuple[TelegramSettings, dict[str, int] | None]:
     settings, data = _load_config(path)
-    return settings, _load_chats(data.get("chats", {}))
+    chats = _load_chats(data.get("chats", {})) if include_chats else None
+    return settings, chats
 
 
 def load_settings(path: Path) -> Settings:
@@ -80,7 +75,7 @@ def load_settings(path: Path) -> Settings:
     chats = _load_chats(data.get("chats", {}))
     if not chats:
         raise ConfigurationError("Configure at least one allowed chat in [chats].")
-    http = _load_http_settings(data["http"]) if "http" in data else None
+    http = _load_http_settings(data.get("http", {}))
     return Settings(settings.api_id, settings.api_hash, settings.session_path, chats, http)
 
 
@@ -109,28 +104,3 @@ def _load_http_settings(http: object) -> HttpSettings:
     if type(port) is not int or not 1024 <= port <= 65535:
         raise ConfigurationError("Set [http].port to an integer from 1024 to 65535.")
     return HttpSettings(port, token)
-
-
-@contextmanager
-def hold_session_lock(session_path: Path) -> Iterator[None]:
-    lock_path = session_path.with_suffix(".session.lock")
-    try:
-        if lock_path.resolve() != lock_path:
-            raise ConfigurationError("The Telegram session lock must be a local file.")
-        lock = lock_path.open("a+b")
-    except (OSError, RuntimeError):
-        raise ConfigurationError("Cannot open the Telegram session lock.") from None
-    with lock:
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                lock.seek(0)
-                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise ConfigurationError("This Telegram session is already in use by another process.") from None
-        yield
