@@ -2,34 +2,37 @@
 
 `tg-mcp` — локальный MCP-сервер для поиска по ключевым словам и автору в группах и каналах любой тематики. Список чатов задаётся в `config.toml`. Поиск выполняется в Telegram и возвращает текст, дату, идентификатор автора и ссылку на сообщение, если Telegram поддерживает ссылку для этого чата.
 
-## Подготовка на Windows
+## Установка
 
-Понадобятся Python 3.11 или новее, аккаунт Telegram и `api_id` с `api_hash` из [Telegram API development tools](https://my.telegram.org/apps). Выполняйте команды в PowerShell из папки проекта.
+Понадобятся Python 3.11 или новее, аккаунт Telegram и `api_id` с `api_hash` из [Telegram API development tools](https://my.telegram.org/apps). Выполняйте команды из папки проекта.
 
-Для Windows x64 с Python 3.12 есть установка с закреплёнными версиями и SHA-256 дистрибутивов:
-
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-win-py312.lock
-.\.venv\Scripts\python.exe -m pip install --no-deps --no-build-isolation .
-```
-
-Один из дистрибутивов в списке, `pyaes`, собирается из исходников. Pip может отдельно установить инструменты для его сборки. [Изоляция сборки в pip](https://pip.pypa.io/en/stable/reference/build-system/#build-isolation)
-
-Для другой версии Python используйте обычную установку:
+Windows (PowerShell)
 
 ```powershell
 py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install .
+.\.venv\Scripts\Activate.ps1
 ```
 
-При обновлении окружения со старым пакетом `relocation-telegram-mcp` сначала остановите сервер и выполните `.\.venv\Scripts\python.exe -m pip uninstall relocation-telegram-mcp`. Затем установите `tg-mcp` по одному из вариантов выше. Это заменит пакеты в окружении с сохранением путей к командам MCP.
+Linux и macOS
 
-При первой настройке скопируйте `config.example.toml` в `config.toml` и заполните `api_id` и `api_hash` в секции `[telegram]`. Путь `session` задаётся относительно папки этого файла. Войдите в Telegram через отдельный терминал, где можно ввести код и пароль двухэтапной аутентификации:
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+```
 
-```powershell
-.\.venv\Scripts\tg-mcp-setup.exe --config config.toml login
-.\.venv\Scripts\tg-mcp-setup.exe --config config.toml chats --toml
+После активации установите проект и закреплённые версии зависимостей:
+
+```console
+python -m pip install -r requirements.txt .
+```
+
+В новом терминале повторите только активацию. При обновлении со старого пакета остановите сервер и выполните `python -m pip uninstall relocation-telegram-mcp` перед установкой.
+
+При первой настройке скопируйте `config.example.toml` в `config.toml` и заполните `api_id` и `api_hash` в секции `[telegram]`. Путь `session` задаётся относительно папки этого файла. Команда `login` запросит код и пароль двухэтапной аутентификации, если он включён.
+
+```console
+tg-mcp-setup --config config.toml login
+tg-mcp-setup --config config.toml chats --toml
 ```
 
 Команда `chats` заполняет кеш идентификаторов сессии. С флагом `--toml` она выводит готовую секцию `[chats]` с названиями в комментариях и сохраняет заданные псевдонимы. Оставьте строки нужных чатов и замените секцию в `config.toml`. Чтобы добавить только новые чаты, вставьте их строки под существующим заголовком `[chats]`.
@@ -46,7 +49,7 @@ housing = -1009876543210
 
 Один процесс `tg-mcp` держит Telegram-сессию и принимает запросы от нескольких чатов Codex одновременно по Streamable HTTP. Все клиенты используют один список разрешённых Telegram-чатов.
 
-1. Задайте секцию `[http]` в файле проекта `config.toml`. Сгенерируйте значение для `token` командой `.\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"`.
+1. Задайте секцию `[http]` в файле проекта `config.toml`. Сгенерируйте значение для `token` командой `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 
    ```toml
    [http]
@@ -56,8 +59,8 @@ housing = -1009876543210
 
 2. Остановите прежний процесс `tg-mcp`, если он использует ту же Telegram-сессию. Запустите сервер из папки проекта и оставьте его работать. Он слушает только `127.0.0.1` и требует токен в каждом запросе.
 
-   ```powershell
-   .\.venv\Scripts\tg-mcp.exe --config config.toml
+   ```console
+   tg-mcp --config config.toml
    ```
 
 3. Добавьте секцию `[mcp_servers.telegram]` в конфигурацию Codex или замените существующую секцию целиком. Используйте тот же токен и порт, что в файле проекта, затем запустите Codex. [Настройки MCP в Codex](https://learn.chatgpt.com/docs/config-file/config-reference#mcp-servers)
@@ -88,8 +91,8 @@ housing = -1009876543210
 
 ## Проверка
 
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```console
+python -m unittest discover -s tests -v
 ```
 
 Тесты используют подставные ответы Telegram и проверяют границу разрешённых чатов, поиск с продолжением выдачи и чтение контекста.
