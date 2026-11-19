@@ -101,7 +101,10 @@ class ServerTests(IsolatedAsyncioTestCase):
         async with Client(self.server, read_timeout_seconds=5) as client:
             self.assertEqual(
                 {tool.name for tool in (await client.list_tools()).tools},
-                {"list_search_chats", "search_messages", "get_message_context"},
+                {
+                    "list_search_chats", "search_messages", "get_message_context",
+                    "search_messages_multi", "get_message_story",
+                },
             )
             aliases = await client.call_tool("list_search_chats", {})
             result = await client.call_tool(

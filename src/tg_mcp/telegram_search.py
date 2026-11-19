@@ -13,6 +13,13 @@ ChatPeer = types.InputPeerChat | types.InputPeerChannel
 class TelegramSearchError(RuntimeError):
     """A Telegram error safe to return to the MCP client."""
 
+    def __init__(
+        self, message: str, *, code: str = "telegram_error", retry_after_seconds: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retry_after_seconds = retry_after_seconds
+
 
 @dataclass(frozen=True)
 class SearchHit:
@@ -37,6 +44,41 @@ class MessageContext:
     replied_to: SearchHit | None
 
 
+@dataclass(frozen=True)
+class RichMessage:
+    message_id: int
+    date: datetime
+    sender_id: int | None
+    text: str | None
+    caption: str | None
+    message_type: str
+    text_status: str
+    url: str | None
+
+
+@dataclass(frozen=True)
+class RichSearchPage:
+    hits: list[RichMessage]
+    next_offset_id: int | None
+
+
+@dataclass(frozen=True)
+class StoryAnchor:
+    message: RichMessage
+    replied_to: RichMessage | None
+    parent_status: str
+    is_user_author: bool
+    use_history: bool = False
+
+
+@dataclass(frozen=True)
+class ReplyPage:
+    hits: list[RichMessage]
+    next_offset_id: int | None
+    use_history: bool
+    status: str
+
+
 class TelegramSearch:
     def __init__(self, client: TelegramClient) -> None:
         self._client = client
@@ -48,16 +90,22 @@ class TelegramSearch:
                 peer = await self._client.get_input_entity(chat_id)
             except ValueError:
                 raise TelegramSearchError(
-                    "Chat is unavailable. Run tg-mcp-setup chats to refresh its ID."
+                    "Chat is unavailable. Run tg-mcp-setup chats to refresh its ID.",
+                    code="chat_unavailable",
                 ) from None
             if not isinstance(peer, (types.InputPeerChat, types.InputPeerChannel)) or utils.get_peer_id(peer) != chat_id:
                 raise TelegramSearchError("The configured ID must resolve to the intended group or channel.")
 
             yield peer
         except errors.FloodWaitError as exc:
-            raise TelegramSearchError(f"Telegram asks you to wait {exc.seconds} seconds before retrying.") from None
+            raise TelegramSearchError(
+                f"Telegram asks you to wait {exc.seconds} seconds before retrying.",
+                code="rate_limited", retry_after_seconds=exc.seconds,
+            ) from None
         except (errors.ChannelPrivateError, errors.ChannelInvalidError, errors.ChatIdInvalidError):
-            raise TelegramSearchError("The configured chat is unavailable to this session.") from None
+            raise TelegramSearchError(
+                "The configured chat is unavailable to this session.", code="chat_unavailable",
+            ) from None
         except TimeoutError:
             raise
         except (errors.RPCError, OSError, ValueError, sqlite3.Error):
@@ -77,6 +125,58 @@ class TelegramSearch:
         async with self._open_chat(chat_id) as peer:
             sender = await _resolve_author(self._client, author)
             return await _search_pages(self._client, peer, query, sender, since, until, limit, offset_id)
+
+    async def search_rich(
+        self,
+        chat_id: int,
+        *,
+        query: str,
+        author: int | None,
+        since: datetime | None,
+        until: datetime | None,
+        limit: int,
+        offset_id: int | None,
+        after_message_id: int | None = None,
+    ) -> RichSearchPage:
+        async with self._open_chat(chat_id) as peer:
+            sender = await _resolve_author(self._client, author)
+            rows, next_offset = await _search_rows(
+                self._client, peer, query, sender, since, until, limit, offset_id, after_message_id,
+            )
+            return RichSearchPage([_rich_message(row, peer) for row in rows], next_offset)
+
+    async def get_story_anchor(self, chat_id: int, message_id: int) -> StoryAnchor:
+        async with self._open_chat(chat_id) as peer:
+            message = await _get_exact_message(self._client, peer, message_id)
+            if message is None:
+                raise TelegramSearchError(
+                    "The message is unavailable in the configured chat.", code="message_unavailable",
+                )
+            parent = None
+            status = "none"
+            reply = message.reply_to
+            if isinstance(reply, types.MessageReplyHeader) and reply.reply_to_msg_id:
+                if not _same_chat_reply(reply, chat_id):
+                    status = "outside_chat"
+                else:
+                    parent = await _get_exact_message(self._client, peer, reply.reply_to_msg_id)
+                    status = "available" if parent is not None else "unavailable"
+            return StoryAnchor(
+                message=_rich_message(message, peer),
+                replied_to=_rich_message(parent, peer) if parent is not None else None,
+                parent_status=status,
+                is_user_author=isinstance(message.from_id, types.PeerUser),
+                use_history=bool(message.post) or isinstance(peer, types.InputPeerChat),
+            )
+
+    async def get_story_replies(
+        self, chat_id: int, message_id: int, *, limit: int,
+        offset_id: int | None, use_history: bool = False,
+    ) -> ReplyPage:
+        async with self._open_chat(chat_id) as peer:
+            return await _reply_pages(
+                self._client, peer, message_id, limit, offset_id, use_history,
+            )
 
     async def get_context(self, chat_id: int, message_id: int, *, before: int, after: int) -> MessageContext:
         async with self._open_chat(chat_id) as peer:
@@ -158,7 +258,9 @@ async def _resolve_author(
             if isinstance(sender, types.InputPeerSelf):
                 sender = await client.get_me(input_peer=True)
     except (ValueError, TypeError, errors.UsernameInvalidError, errors.UsernameNotOccupiedError):
-        raise TelegramSearchError("Author is unavailable. Try a current @username or a known sender_id.") from None
+        raise TelegramSearchError(
+            "Author is unavailable. Try a current @username or a known sender_id.", code="author_unavailable",
+        ) from None
     if not isinstance(sender, types.InputPeerUser) or (
         isinstance(author, int) and sender.user_id != author
     ):
@@ -176,51 +278,203 @@ async def _search_pages(
     limit: int,
     offset_id: int | None,
 ) -> SearchPage:
+    rows, next_offset = await _search_rows(
+        client, peer, query, sender, since, until, limit, offset_id,
+    )
+    return SearchPage([_message_hit(row, peer) for row in rows], next_offset)
+
+
+async def _search_rows(
+    client: TelegramClient,
+    peer: ChatPeer,
+    query: str | None,
+    sender: types.InputPeerUser | None,
+    since: datetime | None,
+    until: datetime | None,
+    limit: int,
+    offset_id: int | None,
+    after_message_id: int | None = None,
+) -> tuple[list[types.Message], int | None]:
     offset = offset_id or 0
     if not offset and until is not None:
         # GetHistory applies the upper date bound before text search, then older pages
         # can use the stable message ID cursor without scanning newer hits again.
         timestamp = ceil(until.timestamp())
         if timestamp <= 0:
-            return SearchPage([], None)
+            return [], None
         if timestamp < 2**31:
             anchor = await _get_history(client, peer, offset_date=timestamp, limit=1)
             if not anchor:
-                return SearchPage([], None)
+                return [], None
             offset = min(anchor[0].id + 1, 2**31 - 1)
 
-    hits: list[SearchHit] = []
+    hits: list[types.Message] = []
     chat_id = utils.get_peer_id(peer)
     for _ in range(4):
         result = await client(functions.messages.SearchRequest(
             peer=peer, q=query or "", from_id=sender, filter=types.InputMessagesFilterEmpty(),
             min_date=None, max_date=None, offset_id=offset, add_offset=0,
-            limit=min(limit + 1, 51), max_id=0, min_id=0, hash=0,
+            limit=min(limit + 1, 51), max_id=0, min_id=after_message_id or 0, hash=0,
         ))
         rows = sorted(
             (row for row in result.messages if row.id > 0 and (offset == 0 or row.id < offset)),
             key=lambda row: row.id, reverse=True,
         )
         if not rows:
-            return SearchPage(hits, None)
+            return hits, None
         for row in rows:
+            if after_message_id is not None and row.id <= after_message_id:
+                return hits, None
             if not isinstance(row, (types.Message, types.MessageService)) or utils.get_peer_id(row.peer_id) != chat_id:
                 continue
             if since is not None and row.date < since:
-                return SearchPage(hits, None)
+                return hits, None
             if not isinstance(row, types.Message) or (until is not None and row.date >= until):
                 continue
-            hit = _message_hit(row, peer)
-            if sender is not None and hit.sender_id != sender.user_id:
+            sender_id = utils.get_peer_id(row.from_id) if row.from_id is not None else None
+            if sender is not None and sender_id != sender.user_id:
                 continue
             # IDs advance across batches, but Telegram can repeat an ID within one batch.
-            if hits and hit.message_id == hits[-1].message_id:
+            if hits and row.id == hits[-1].id:
                 continue
             if len(hits) == limit:
-                return SearchPage(hits, hits[-1].message_id)
-            hits.append(hit)
+                return hits, hits[-1].id
+            hits.append(row)
         offset = rows[-1].id
 
     # A short page can contain unavailable messages. Keep the cursor so the
     # caller can continue after this call's fixed batch budget.
-    return SearchPage(hits, offset)
+    return hits, offset
+
+
+def _rich_message(message: types.Message, peer: ChatPeer) -> RichMessage:
+    kind = _message_type(message)
+    body = message.message if message.message and message.message.strip() else None
+    has_caption = kind not in ("text", "link_preview")
+    return RichMessage(
+        message_id=message.id,
+        date=message.date,
+        sender_id=utils.get_peer_id(message.from_id) if message.from_id is not None else None,
+        text=body if not has_caption else None,
+        caption=body if has_caption else None,
+        message_type=kind,
+        text_status=("caption" if has_caption else "text") if body is not None else "absent",
+        url=f"https://t.me/c/{peer.channel_id}/{message.id}" if isinstance(peer, types.InputPeerChannel) else None,
+    )
+
+
+def _message_type(message: types.Message) -> str:
+    media = message.media
+    if media is None or isinstance(media, types.MessageMediaEmpty):
+        return "text"
+    if isinstance(media, types.MessageMediaWebPage):
+        return "link_preview"
+    if isinstance(media, types.MessageMediaPhoto):
+        return "photo"
+    if isinstance(media, types.MessageMediaDocument):
+        document = media.document
+        if not isinstance(document, types.Document):
+            return "document"
+        for attribute in document.attributes:
+            if isinstance(attribute, types.DocumentAttributeSticker):
+                return "sticker"
+            if isinstance(attribute, types.DocumentAttributeAudio):
+                return "voice" if attribute.voice else "audio"
+            if isinstance(attribute, types.DocumentAttributeVideo) and attribute.round_message:
+                return "round_video"
+        if any(isinstance(attribute, types.DocumentAttributeAnimated) for attribute in document.attributes):
+            return "animation"
+        if any(isinstance(attribute, types.DocumentAttributeVideo) for attribute in document.attributes):
+            return "video"
+        return "document"
+    if isinstance(media, types.MessageMediaPoll):
+        return "poll"
+    if isinstance(media, types.MessageMediaContact):
+        return "contact"
+    if isinstance(media, (types.MessageMediaGeo, types.MessageMediaGeoLive, types.MessageMediaVenue)):
+        return "location"
+    return "unsupported"
+
+
+def _same_chat_reply(reply: types.MessageReplyHeader, chat_id: int) -> bool:
+    return not reply.reply_to_scheduled and (
+        reply.reply_to_peer_id is None or utils.get_peer_id(reply.reply_to_peer_id) == chat_id
+    )
+
+
+async def _get_exact_message(
+    client: TelegramClient, peer: ChatPeer, message_id: int,
+) -> types.Message | None:
+    try:
+        rows = await _get_history(client, peer, offset_id=message_id, add_offset=-1, limit=1)
+    except (errors.MessageIdInvalidError, errors.MsgIdInvalidError):
+        return None
+    chat_id = utils.get_peer_id(peer)
+    return next((
+        row for row in rows
+        if isinstance(row, types.Message) and row.id == message_id
+        and row.peer_id is not None and utils.get_peer_id(row.peer_id) == chat_id
+    ), None)
+
+
+async def _reply_pages(
+    client: TelegramClient, peer: ChatPeer, message_id: int, limit: int,
+    offset_id: int | None, use_history: bool,
+) -> ReplyPage:
+    history = use_history or isinstance(peer, types.InputPeerChat)
+    offset = offset_id or 0
+    chat_id = utils.get_peer_id(peer)
+    hits: list[RichMessage] = []
+    for _ in range(4):
+        if history:
+            raw_rows = await _get_history(client, peer, offset_id=offset, limit=100)
+        else:
+            try:
+                result = await client(functions.messages.GetRepliesRequest(
+                    peer=peer, msg_id=message_id, offset_id=offset, offset_date=None,
+                    add_offset=0, limit=100, max_id=0, min_id=0, hash=0,
+                ))
+            except errors.BadRequestError as exc:
+                if not isinstance(exc, (
+                    errors.MsgIdInvalidError, errors.MessageIdInvalidError,
+                    errors.PeerIdInvalidError, errors.MethodInvalidError,
+                )) and exc.message != "TOPIC_ID_INVALID":
+                    raise
+                history = True
+                raw_rows = await _get_history(client, peer, offset_id=offset, limit=100)
+            else:
+                raw_rows = result.messages
+                # Channel comments can arrive from a linked discussion chat. Its
+                # message IDs belong to a different namespace, so restart locally.
+                foreign = any(
+                    row.peer_id is not None and utils.get_peer_id(row.peer_id) != chat_id
+                    for row in raw_rows
+                )
+                if foreign or (not raw_rows and offset == 0):
+                    history = True
+                    raw_rows = await _get_history(client, peer, offset_id=offset, limit=100)
+        rows = sorted(
+            (row for row in raw_rows if row.id > 0 and (not offset or row.id < offset)),
+            key=lambda row: row.id, reverse=True,
+        )
+        if not rows:
+            return ReplyPage(hits, None, history, "complete")
+        for row in rows:
+            if row.id <= message_id:
+                return ReplyPage(hits, None, history, "complete")
+            if not isinstance(row, types.Message) or row.peer_id is None:
+                continue
+            if utils.get_peer_id(row.peer_id) != chat_id:
+                continue
+            reply = row.reply_to
+            if not isinstance(reply, types.MessageReplyHeader) or (
+                reply.reply_to_msg_id != message_id or not _same_chat_reply(reply, chat_id)
+            ):
+                continue
+            if hits and hits[-1].message_id == row.id:
+                continue
+            if len(hits) == limit:
+                return ReplyPage(hits, hits[-1].message_id, history, "more")
+            hits.append(_rich_message(row, peer))
+        offset = rows[-1].id
+    return ReplyPage(hits, offset, history, "more")
