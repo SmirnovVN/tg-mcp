@@ -26,8 +26,6 @@ python3 -m venv .venv
 python -m pip install -r requirements.txt .
 ```
 
-В новом терминале повторите только активацию. При обновлении со старого пакета остановите сервер и выполните `python -m pip uninstall relocation-telegram-mcp` перед установкой.
-
 При первой настройке скопируйте `config.example.toml` в `config.toml` и заполните `api_id` и `api_hash` в секции `[telegram]`. Путь `session` задаётся относительно папки этого файла. Команда `login` запросит код и пароль двухэтапной аутентификации, если он включён.
 
 `tg-mcp` и `tg-mcp-setup` по умолчанию читают `config.toml` из текущей папки. Для другого файла укажите `--config`, например `tg-mcp-setup --config config.local.toml chats`.
