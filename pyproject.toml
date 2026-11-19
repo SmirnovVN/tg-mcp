@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Local MCP search for an explicit list of Telegram chats."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "mcp==2.3.0",
     "pydantic==2.14.3",

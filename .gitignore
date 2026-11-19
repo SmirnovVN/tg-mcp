@@ -5,6 +5,7 @@ dist/
 *.egg-info/
 __pycache__/
 config.toml
+config.local.toml
 .env
 *.session*
 .idea
