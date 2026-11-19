@@ -43,7 +43,7 @@ async def open_session(
     if create:
         path.parent.mkdir(parents=True, exist_ok=True)
     elif not path.is_file():
-        raise ConfigurationError("Telegram session is missing. Run tg-mcp-setup --config config.toml login.")
+        raise ConfigurationError("Telegram session is missing. Run tg-mcp-setup login.")
     with _hold_session_lock(path):
         client = TelegramClient(
             str(path), settings.api_id, settings.api_hash, receive_updates=False,

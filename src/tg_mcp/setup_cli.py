@@ -8,7 +8,7 @@ from pathlib import Path
 
 from telethon import TelegramClient, errors
 
-from .config import ConfigurationError, TelegramSettings, load_setup_settings
+from .config import DEFAULT_CONFIG, ConfigurationError, TelegramSettings, load_setup_settings
 from .telegram_session import open_session
 
 
@@ -32,7 +32,7 @@ async def _login(client: TelegramClient) -> None:
 
 async def _list_chats(client: TelegramClient, configured_chats: dict[str, int] | None = None) -> None:
     if not await client.is_user_authorized():
-        raise ConfigurationError("Run tg-mcp-setup --config config.toml login first.")
+        raise ConfigurationError("Run tg-mcp-setup login first.")
     dialogs = (
         dialog async for dialog in client.iter_dialogs()
         if dialog.id < 0 and (dialog.is_group or dialog.is_channel)
@@ -78,7 +78,10 @@ async def _run(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Authorize a local Telegram session and choose chat IDs.")
-    parser.add_argument("--config", required=True, type=Path, help="Path to the local TOML configuration.")
+    parser.add_argument(
+        "--config", type=Path, default=DEFAULT_CONFIG,
+        help="Path to the local TOML configuration (default: %(default)s in the working directory).",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("login", help="Authorize the session interactively.").set_defaults(toml=False)
     chats = commands.add_parser("chats", help="List your groups and channels in this terminal.")

@@ -12,7 +12,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BeforeValidator, Field
 
-from .config import ConfigurationError, Settings, load_settings
+from .config import DEFAULT_CONFIG, ConfigurationError, Settings, load_settings
 from .http_server import serve_http
 from .telegram_search import MessageContext, SearchHit, TelegramSearch, TelegramSearchError
 from .telegram_session import open_user_session
@@ -145,7 +145,10 @@ async def _serve(settings: Settings) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Serve Telegram chat search over local Streamable HTTP.")
-    parser.add_argument("--config", required=True, type=Path, help="Path to the local TOML configuration.")
+    parser.add_argument(
+        "--config", type=Path, default=DEFAULT_CONFIG,
+        help="Path to the local TOML configuration (default: %(default)s in the working directory).",
+    )
     # Accept the option used by existing HTTP launch commands.
     parser.add_argument("--transport", choices=("streamable-http",), help=argparse.SUPPRESS)
     args = parser.parse_args()

@@ -48,7 +48,7 @@ class TelegramSearch:
                 peer = await self._client.get_input_entity(chat_id)
             except ValueError:
                 raise TelegramSearchError(
-                    "Chat is unavailable. Run tg-mcp-setup --config config.toml chats to refresh its ID."
+                    "Chat is unavailable. Run tg-mcp-setup chats to refresh its ID."
                 ) from None
             if not isinstance(peer, (types.InputPeerChat, types.InputPeerChannel)) or utils.get_peer_id(peer) != chat_id:
                 raise TelegramSearchError("The configured ID must resolve to the intended group or channel.")

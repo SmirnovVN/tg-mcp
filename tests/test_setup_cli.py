@@ -1,6 +1,6 @@
 import io
 import tomllib
-from contextlib import redirect_stdout
+from contextlib import chdir, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -39,7 +39,8 @@ class SetupCliTests(TestCase):
             config.with_name("test.session").touch()
             config.write_text(telegram + "\n[chats]\nhousing = -101\narchive = -505\n", encoding="utf-8")
             with (
-                patch("sys.argv", ["tg-mcp-setup", "--config", str(config), "chats", "--toml"]),
+                chdir(directory),
+                patch("sys.argv", ["tg-mcp-setup", "chats", "--toml"]),
                 patch("tg_mcp.telegram_session.TelegramClient", return_value=client),
                 redirect_stdout(io.StringIO()) as output,
             ):

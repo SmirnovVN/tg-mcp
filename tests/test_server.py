@@ -1,3 +1,4 @@
+from contextlib import chdir
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -16,7 +17,7 @@ from tg_mcp.telegram_session import _hold_session_lock
 
 
 class ConfigTests(TestCase):
-    def test_launch_uses_http_with_config_only(self) -> None:
+    def test_launch_uses_http_with_default_or_explicit_config(self) -> None:
         project = Path(__file__).resolve().parents[1]
         token = "a" * 48
         http = HttpSettings(port=8765, token=token)
@@ -33,8 +34,13 @@ class ConfigTests(TestCase):
             with config.open("a", encoding="utf-8") as stream:
                 stream.write(f'[http]\ntoken = "{token}"\n')
 
-            for extra_args in ([], ["--transport", "streamable-http"]):
-                with self.subTest(extra_args=extra_args):
+            other_directory = config.parent / "other"
+            other_directory.mkdir()
+            for cwd, args in (
+                (config.parent, []),
+                (other_directory, ["--config", "../config.toml", "--transport", "streamable-http"]),
+            ):
+                with self.subTest(args=args):
                     client = AsyncMock()
                     client.get_me.return_value = types.User(id=12345)
 
@@ -45,7 +51,8 @@ class ConfigTests(TestCase):
                                 pass
 
                     with (
-                        patch("sys.argv", ["tg-mcp", "--config", str(config), *extra_args]),
+                        chdir(cwd),
+                        patch("sys.argv", ["tg-mcp", *args]),
                         patch("tg_mcp.telegram_session.TelegramClient", return_value=client),
                         patch("tg_mcp.server.serve_http", side_effect=serve_while_locked) as serve,
                     ):

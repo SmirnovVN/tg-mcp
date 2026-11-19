@@ -30,9 +30,11 @@ python -m pip install -r requirements.txt .
 
 При первой настройке скопируйте `config.example.toml` в `config.toml` и заполните `api_id` и `api_hash` в секции `[telegram]`. Путь `session` задаётся относительно папки этого файла. Команда `login` запросит код и пароль двухэтапной аутентификации, если он включён.
 
+`tg-mcp` и `tg-mcp-setup` по умолчанию читают `config.toml` из текущей папки. Для другого файла укажите `--config`, например `tg-mcp-setup --config my-config.toml chats`.
+
 ```console
-tg-mcp-setup --config config.toml login
-tg-mcp-setup --config config.toml chats --toml
+tg-mcp-setup login
+tg-mcp-setup chats --toml
 ```
 
 Команда `chats` заполняет кеш идентификаторов сессии. С флагом `--toml` она выводит готовую секцию `[chats]` с названиями в комментариях и сохраняет заданные псевдонимы. Оставьте строки нужных чатов и замените секцию в `config.toml`. Чтобы добавить только новые чаты, вставьте их строки под существующим заголовком `[chats]`.
@@ -60,7 +62,7 @@ housing = -1009876543210
 2. Остановите прежний процесс `tg-mcp`, если он использует ту же Telegram-сессию. Запустите сервер из папки проекта и оставьте его работать. Он слушает только `127.0.0.1` и требует токен в каждом запросе.
 
    ```console
-   tg-mcp --config config.toml
+   tg-mcp
    ```
 
 3. Добавьте секцию `[mcp_servers.telegram]` в конфигурацию Codex или замените существующую секцию целиком. Используйте тот же токен и порт, что в файле проекта, затем запустите Codex. [Настройки MCP в Codex](https://learn.chatgpt.com/docs/config-file/config-reference#mcp-servers)

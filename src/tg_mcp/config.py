@@ -3,6 +3,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+DEFAULT_CONFIG = Path("config.toml")
+
 
 class ConfigurationError(ValueError):
     """A configuration or setup problem safe to show to the caller."""
