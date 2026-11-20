@@ -34,7 +34,7 @@ class ResearchProtocolTests(IsolatedAsyncioTestCase):
         photo = self.message(90, text="photo caption", media=types.MessageMediaPhoto(photo=types.PhotoEmpty(1)))
         audio = self.message(80, text=" ", media=types.MessageMediaDocument(document=voice))
         preview = self.message(70, text="link", media=types.MessageMediaWebPage(webpage=types.WebPageEmpty(1)))
-        self.client.side_effect = [SimpleNamespace(messages=[photo, audio, preview]), SimpleNamespace(messages=[])]
+        self.client.return_value = SimpleNamespace(messages=[photo, audio, preview])
 
         result = await self.backend.search_rich(
             self.chat_id, query="caption", author=None, since=None, until=None, limit=5, offset_id=None,
@@ -47,7 +47,31 @@ class ResearchProtocolTests(IsolatedAsyncioTestCase):
         self.assertIsNone(second.caption)
         self.assertEqual((second.message_type, second.text_status), ("voice", "absent"))
         self.assertEqual((third.message_type, third.text, third.caption), ("link_preview", "link", None))
-        self.assertIsNone(result.next_offset_id)
+        self.assertEqual(result.next_offset_id, 70)
+        self.client.assert_awaited_once()
+
+    async def test_prepared_search_start_is_reused_across_phrases(self) -> None:
+        until = datetime(2026, 3, 16, tzinfo=UTC)
+        self.client.side_effect = [
+            SimpleNamespace(messages=[self.message(90)]),
+            SimpleNamespace(messages=[self.message(80)]),
+            SimpleNamespace(messages=[self.message(70)]),
+        ]
+
+        offset = await self.backend.get_search_start(self.chat_id, until)
+        self.assertEqual(offset, 91)
+        for query, prepared_offset in (("first", offset), ("second", 0)):
+            page = await self.backend.search_rich(
+                self.chat_id, query=query, author=None, since=None, until=until,
+                limit=5, offset_id=prepared_offset,
+            )
+            self.assertEqual(len(page.hits), 1)
+
+        anchor, first, second = (call.args[0] for call in self.client.await_args_list)
+        self.assertIsInstance(anchor, functions.messages.GetHistoryRequest)
+        self.assertIsInstance(first, functions.messages.SearchRequest)
+        self.assertIsInstance(second, functions.messages.SearchRequest)
+        self.assertEqual((first.offset_id, second.offset_id), (91, 0))
 
     async def test_rich_search_bounds_followups_after_the_anchor(self) -> None:
         author = types.InputPeerUser(12345, 8)
@@ -85,8 +109,35 @@ class ResearchProtocolTests(IsolatedAsyncioTestCase):
             SimpleNamespace(messages=[types.MessageEmpty(id=70, peer_id=None)]),
         ]
         result = await self.backend.get_story_anchor(self.chat_id, 90)
-        self.assertEqual(result.parent_status, "unavailable")
+        self.assertEqual(result.parent_status, "pending")
+        self.assertEqual(result.parent_message_id, 70)
         self.assertIsNone(result.replied_to)
+        self.client.assert_awaited_once()
+        self.assertIsNone(await self.backend.get_story_parent(self.chat_id, result.parent_message_id))
+
+    async def test_optional_parent_flood_wait_preserves_the_already_read_anchor(self) -> None:
+        self.client.side_effect = [
+            SimpleNamespace(messages=[self.message(90, parent=70)]),
+            errors.FloodWaitError(request=None, capture=32),
+        ]
+
+        anchor = await self.backend.get_story_anchor(self.chat_id, 90)
+        self.assertEqual(anchor.message.message_id, 90)
+        with self.assertRaises(TelegramSearchError) as raised:
+            await self.backend.get_story_parent(self.chat_id, anchor.parent_message_id)
+        self.assertEqual(raised.exception.code, "rate_limited")
+        self.assertEqual(raised.exception.retry_after_seconds, 32)
+
+    async def test_context_does_not_use_a_scheduled_reply_id_as_a_regular_parent(self) -> None:
+        anchor = self.message(90, parent=70)
+        anchor.reply_to.reply_to_scheduled = True
+        self.client.return_value = SimpleNamespace(messages=[anchor, self.message(70)])
+
+        context = await self.backend.get_context(self.chat_id, 90, before=1, after=0)
+
+        self.assertIsNone(context.replied_to)
+        self.assertEqual([hit.message_id for hit in context.before], [70])
+        self.client.assert_awaited_once()
 
     async def test_broadcast_anchor_selects_history_before_getting_replies(self) -> None:
         anchor = self.message(50, post=True)
@@ -120,7 +171,7 @@ class ResearchProtocolTests(IsolatedAsyncioTestCase):
         self.assertFalse(result.use_history)
         self.assertIsInstance(self.client.await_args.args[0], functions.messages.GetRepliesRequest)
 
-    async def test_unsupported_replies_scan_bounded_history_and_keep_sparse_cursor(self) -> None:
+    async def test_unsupported_replies_checkpoint_each_sparse_history_page(self) -> None:
         self.client.side_effect = [
             errors.PeerIdInvalidError(request=None),
             SimpleNamespace(messages=[self.message(300), self.message(299)]),
@@ -129,11 +180,19 @@ class ResearchProtocolTests(IsolatedAsyncioTestCase):
             SimpleNamespace(messages=[self.message(150)]),
         ]
         result = await self.backend.get_story_replies(self.chat_id, 50, limit=5, offset_id=None)
-
-        self.assertEqual(result.hits, [])
-        self.assertEqual(result.next_offset_id, 150)
+        self.assertIsNone(result.next_offset_id)
         self.assertEqual(result.status, "more")
         self.assertTrue(result.use_history)
+        self.client.assert_awaited_once()
+        for call_count, offset in enumerate((299, 250, 200, 150), start=2):
+            result = await self.backend.get_story_replies(
+                self.chat_id, 50, limit=5, offset_id=result.next_offset_id, use_history=result.use_history,
+            )
+            self.assertEqual(result.hits, [])
+            self.assertEqual(result.next_offset_id, offset)
+            self.assertEqual(result.status, "more")
+            self.assertTrue(result.use_history)
+            self.assertEqual(self.client.await_count, call_count)
         requests = [call.args[0] for call in self.client.await_args_list]
         self.assertTrue(all(isinstance(request, functions.messages.GetHistoryRequest) for request in requests[1:]))
         self.assertEqual([request.offset_id for request in requests[1:]], [0, 299, 250, 200])
@@ -146,6 +205,11 @@ class ResearchProtocolTests(IsolatedAsyncioTestCase):
             SimpleNamespace(messages=[self.message(90, parent=50), self.message(50)]),
         ]
         result = await self.backend.get_story_replies(self.chat_id, 50, limit=5, offset_id=None)
+        self.assertFalse(result.hits)
+        self.client.assert_awaited_once()
+        result = await self.backend.get_story_replies(
+            self.chat_id, 50, limit=5, offset_id=result.next_offset_id, use_history=result.use_history,
+        )
 
         self.assertEqual([message.message_id for message in result.hits], [90])
         self.assertIsNone(result.next_offset_id)
@@ -161,6 +225,11 @@ class ResearchProtocolTests(IsolatedAsyncioTestCase):
         ]
 
         result = await self.backend.get_story_replies(self.chat_id, 50, limit=5, offset_id=None)
+        self.assertEqual(result.status, "more")
+        self.client.assert_awaited_once()
+        result = await self.backend.get_story_replies(
+            self.chat_id, 50, limit=5, offset_id=result.next_offset_id, use_history=result.use_history,
+        )
 
         self.assertTrue(result.use_history)
         self.assertEqual([message.message_id for message in result.hits], [90])

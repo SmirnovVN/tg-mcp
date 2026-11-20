@@ -61,6 +61,7 @@ class HttpServerTests(IsolatedAsyncioTestCase):
 
     async def test_multi_search_cursor_continues_in_another_http_client(self) -> None:
         date = datetime(2026, 11, 1, tzinfo=UTC)
+        self.backend.get_search_start.return_value = 0
         self.backend.search_rich.side_effect = [
             RichSearchPage([RichMessage(42, date, 12345, "visa", None, "text", "text", None)], 42),
             RichSearchPage([RichMessage(41, date, 12345, "visa", None, "text", "text", None)], None),

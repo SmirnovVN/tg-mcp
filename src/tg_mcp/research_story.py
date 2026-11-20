@@ -3,11 +3,14 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal
 
-from .multi_search import REQUEST_TIMEOUT, MultiSearch, MultiSearchResult
+from .multi_search import PAGE_TIMEOUT, REQUEST_TIMEOUT, MultiSearch, MultiSearchResult
 from .page_cursors import CursorPages
 from .telegram_search import (
     ReplyPage, RichMessage, StoryAnchor, TelegramSearch, TelegramSearchError,
 )
+
+
+REPLY_BATCH_BUDGET = 4
 
 
 @dataclass(frozen=True)
@@ -16,6 +19,7 @@ class FollowUp:
     since: datetime | None
     until: datetime
     limit: int
+    max_text_chars: int | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,13 @@ class StoryFollowUp:
 
 
 @dataclass(frozen=True)
+class StoryError:
+    message: str
+    code: str
+    retry_after_seconds: int | None = None
+
+
+@dataclass(frozen=True)
 class StoryResult:
     chat: str
     message: RichMessage
@@ -48,6 +59,8 @@ class StoryResult:
     parent_status: str
     replies: StoryReplies
     follow_up: StoryFollowUp | None
+    parent_error: StoryError | None = None
+    context_text_included: bool = True
 
 
 @dataclass(frozen=True)
@@ -58,14 +71,16 @@ class _StoryPage:
     replies_limit: int
     offset_id: int | None = None
     use_history: bool = False
-    follow_up: StoryFollowUp | None = None
+    parent_error: StoryError | None = None
 
 
 @dataclass(frozen=True)
-class _ReplyFailure:
-    message: str
-    code: str
-    retry_after_seconds: int | None = None
+class _ReplyRead:
+    hits: list[RichMessage]
+    status: str
+    offset_id: int | None
+    use_history: bool
+    error: StoryError | None
 
 
 class ResearchStory:
@@ -92,29 +107,91 @@ class ResearchStory:
         async with asyncio.timeout(REQUEST_TIMEOUT), self._requests:
             anchor = await self._backend.get_story_anchor(chat_id, message_id)
         state = _StoryPage(chat, chat_id, anchor, replies_limit, use_history=anchor.use_history)
-        replies, author_result = await asyncio.gather(
+        parent, replies, author_result = await asyncio.gather(
+            self._read_parent(state),
             self._read_replies(state),
             self._read_follow_up(state, follow_up),
         )
-        return self._result(replace(state, follow_up=author_result), replies)
+        anchor, parent_error = parent
+        return self._result(replace(state, anchor=anchor, parent_error=parent_error), replies, author_result)
 
     async def resume(self, cursor: str) -> StoryResult:
         return await self._pages.get(cursor)
 
-    async def _read_replies(self, state: _StoryPage) -> ReplyPage | _ReplyFailure:
+    async def _read_parent(self, state: _StoryPage) -> tuple[StoryAnchor, StoryError | None]:
+        anchor = state.anchor
+        parent_id = anchor.parent_message_id
+        if parent_id is None:
+            return anchor, None
         try:
             async with asyncio.timeout(REQUEST_TIMEOUT), self._requests:
-                return await self._backend.get_story_replies(
-                    state.chat_id,
-                    state.anchor.message.message_id,
-                    limit=state.replies_limit,
-                    offset_id=state.offset_id,
-                    use_history=state.use_history,
-                )
+                parent = await self._backend.get_story_parent(state.chat_id, parent_id)
         except TelegramSearchError as exc:
-            return _ReplyFailure(str(exc), exc.code, exc.retry_after_seconds)
+            error = StoryError(str(exc), exc.code, exc.retry_after_seconds)
         except TimeoutError:
-            return _ReplyFailure("Telegram replies timed out. Retry this reply page.", "timeout")
+            error = StoryError("Telegram parent message request timed out.", "timeout")
+        else:
+            status = "available" if parent is not None else "unavailable"
+            return replace(anchor, replied_to=parent, parent_status=status), None
+        return replace(anchor, parent_status="failed"), error
+
+    async def _read_replies(self, state: _StoryPage) -> _ReplyRead:
+        anchor = state.anchor.message
+        hits: dict[int, RichMessage] = {}
+        offset = state.offset_id
+        use_history = state.use_history
+        status = "more"
+        error = None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + PAGE_TIMEOUT
+        for _ in range(REPLY_BATCH_BUDGET):
+            if loop.time() >= deadline:
+                break
+            page_budget = asyncio.timeout_at(deadline)
+            try:
+                async with page_budget, self._requests, asyncio.timeout(REQUEST_TIMEOUT):
+                    page: ReplyPage = await self._backend.get_story_replies(
+                        state.chat_id,
+                        anchor.message_id,
+                        limit=state.replies_limit - len(hits),
+                        offset_id=offset,
+                        use_history=use_history,
+                    )
+            except TelegramSearchError as exc:
+                error = StoryError(str(exc), exc.code, exc.retry_after_seconds)
+                break
+            except TimeoutError:
+                if not page_budget.expired():
+                    error = StoryError("Telegram replies timed out. Retry this reply page.", "timeout")
+                break
+
+            hits.update({
+                hit.message_id: hit for hit in page.hits
+                if hit.message_id > anchor.message_id and hit.date >= anchor.date
+                and (offset is None or hit.message_id < offset)
+            })
+            status = page.status
+            if status != "more":
+                break
+            next_offset = page.next_offset_id
+            if next_offset is not None and next_offset <= anchor.message_id:
+                status = "complete"
+                break
+            offset_moved = next_offset is not None and (offset is None or next_offset < offset)
+            entered_history = page.use_history and not use_history and next_offset == offset
+            if not offset_moved and not entered_history:
+                error = StoryError("Telegram returned a reply cursor without progress.", "stalled_offset")
+                break
+            offset, use_history = next_offset, page.use_history
+            if len(hits) >= state.replies_limit:
+                break
+
+        if error is not None:
+            status = "partial" if hits else "failed"
+        return _ReplyRead(
+            sorted(hits.values(), key=lambda hit: hit.message_id, reverse=True),
+            status, offset, use_history, error,
+        )
 
     async def _read_follow_up(
         self, state: _StoryPage, request: FollowUp | None,
@@ -133,6 +210,7 @@ class ResearchStory:
                 "same_author_and_query", "empty_interval", since, request.until, None,
                 "The requested interval contains no messages after this anchor.",
             )
+        text_limit = {"max_text_chars": request.max_text_chars} if request.max_text_chars is not None else {}
         result = await self._multi_search.search(
             {state.chat: state.chat_id},
             request.queries,
@@ -141,6 +219,7 @@ class ResearchStory:
             request.limit,
             author=anchor.sender_id,
             after_message_id=anchor.message_id,
+            **text_limit,
         )
         status: Literal["complete", "more", "partial"] = "complete"
         if result.partial:
@@ -150,38 +229,42 @@ class ResearchStory:
         return StoryFollowUp("same_author_and_query", status, since, request.until, result, None)
 
     async def _resume_page(self, state: _StoryPage) -> StoryResult:
-        return self._result(state, await self._read_replies(state))
+        return self._result(state, await self._read_replies(state), context_text_included=False)
 
-    def _result(self, state: _StoryPage, page: ReplyPage | _ReplyFailure) -> StoryResult:
+    def _result(
+        self, state: _StoryPage, page: _ReplyRead, follow_up: StoryFollowUp | None = None,
+        *, context_text_included: bool = True,
+    ) -> StoryResult:
         next_cursor = None
         retry_cursor = None
-        if isinstance(page, _ReplyFailure):
-            hits: list[RichMessage] = []
-            status = "failed"
-            retry_cursor = self._pages.add(lambda: self._resume_page(state))
-        else:
-            anchor = state.anchor.message
-            hits_by_id = {
-                hit.message_id: hit for hit in page.hits
-                if hit.message_id > anchor.message_id and hit.date >= anchor.date
-                and (state.offset_id is None or hit.message_id < state.offset_id)
-            }
-            hits = sorted(hits_by_id.values(), key=lambda hit: hit.message_id, reverse=True)
-            offset = page.next_offset_id
-            if offset is not None and offset > anchor.message_id:
-                continuation = replace(state, offset_id=offset, use_history=page.use_history)
-                next_cursor = self._pages.add(lambda: self._resume_page(continuation))
-            status = page.status
+        error = page.error
+        if page.status == "more" or (error is not None and error.code != "stalled_offset"):
+            anchor = state.anchor
+            if context_text_included:
+                parent = anchor.replied_to
+                anchor = replace(
+                    anchor,
+                    message=replace(anchor.message, text=None, caption=None),
+                    replied_to=replace(parent, text=None, caption=None) if parent is not None else None,
+                )
+            continuation = replace(state, anchor=anchor, offset_id=page.offset_id, use_history=page.use_history)
+            cursor = self._pages.add(lambda: self._resume_page(continuation))
+            if page.status == "more":
+                next_cursor = cursor
+            else:
+                retry_cursor = cursor
         return StoryResult(
             state.chat,
             state.anchor.message,
             state.anchor.replied_to,
             state.anchor.parent_status,
             StoryReplies(
-                "direct_replies", hits, status, next_cursor, retry_cursor,
-                page.message if isinstance(page, _ReplyFailure) else None,
-                page.code if isinstance(page, _ReplyFailure) else None,
-                page.retry_after_seconds if isinstance(page, _ReplyFailure) else None,
+                "direct_replies", page.hits, page.status, next_cursor, retry_cursor,
+                error.message if error is not None else None,
+                error.code if error is not None else None,
+                error.retry_after_seconds if error is not None else None,
             ),
-            state.follow_up,
+            follow_up,
+            state.parent_error,
+            context_text_included,
         )

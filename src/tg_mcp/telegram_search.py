@@ -69,6 +69,7 @@ class StoryAnchor:
     parent_status: str
     is_user_author: bool
     use_history: bool = False
+    parent_message_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -142,8 +143,14 @@ class TelegramSearch:
             sender = await _resolve_author(self._client, author)
             rows, next_offset = await _search_rows(
                 self._client, peer, query, sender, since, until, limit, offset_id, after_message_id,
+                max_batches=1,
             )
             return RichSearchPage([_rich_message(row, peer) for row in rows], next_offset)
+
+    async def get_search_start(self, chat_id: int, until: datetime) -> int | None:
+        """Return an exclusive offset, zero for the full chat, or None for an empty range."""
+        async with self._open_chat(chat_id) as peer:
+            return await _search_start(self._client, peer, until)
 
     async def get_story_anchor(self, chat_id: int, message_id: int) -> StoryAnchor:
         async with self._open_chat(chat_id) as peer:
@@ -152,29 +159,35 @@ class TelegramSearch:
                 raise TelegramSearchError(
                     "The message is unavailable in the configured chat.", code="message_unavailable",
                 )
-            parent = None
+            parent_message_id = None
             status = "none"
             reply = message.reply_to
             if isinstance(reply, types.MessageReplyHeader) and reply.reply_to_msg_id:
                 if not _same_chat_reply(reply, chat_id):
                     status = "outside_chat"
                 else:
-                    parent = await _get_exact_message(self._client, peer, reply.reply_to_msg_id)
-                    status = "available" if parent is not None else "unavailable"
+                    parent_message_id = reply.reply_to_msg_id
+                    status = "pending"
             return StoryAnchor(
                 message=_rich_message(message, peer),
-                replied_to=_rich_message(parent, peer) if parent is not None else None,
+                replied_to=None,
                 parent_status=status,
                 is_user_author=isinstance(message.from_id, types.PeerUser),
                 use_history=bool(message.post) or isinstance(peer, types.InputPeerChat),
+                parent_message_id=parent_message_id,
             )
+
+    async def get_story_parent(self, chat_id: int, message_id: int) -> RichMessage | None:
+        async with self._open_chat(chat_id) as peer:
+            parent = await _get_exact_message(self._client, peer, message_id)
+            return _rich_message(parent, peer) if parent is not None else None
 
     async def get_story_replies(
         self, chat_id: int, message_id: int, *, limit: int,
         offset_id: int | None, use_history: bool = False,
     ) -> ReplyPage:
         async with self._open_chat(chat_id) as peer:
-            return await _reply_pages(
+            return await _reply_page(
                 self._client, peer, message_id, limit, offset_id, use_history,
             )
 
@@ -197,18 +210,11 @@ class TelegramSearch:
             reply = anchor.reply_to
             if (
                 isinstance(reply, types.MessageReplyHeader) and reply.reply_to_msg_id
-                and (reply.reply_to_peer_id is None or utils.get_peer_id(reply.reply_to_peer_id) == chat_id)
+                and _same_chat_reply(reply, chat_id)
             ):
                 parent = messages.get(reply.reply_to_msg_id)
                 if parent is None:
-                    reply_rows = await _get_history(
-                        self._client, peer, offset_id=reply.reply_to_msg_id, add_offset=-1, limit=1,
-                    )
-                    parent = next((
-                        row for row in reply_rows
-                        if isinstance(row, types.Message) and row.id == reply.reply_to_msg_id
-                        and utils.get_peer_id(row.peer_id) == chat_id
-                    ), None)
+                    parent = await _get_exact_message(self._client, peer, reply.reply_to_msg_id)
 
             older = sorted(mid for mid in messages if mid < message_id)
             newer = sorted(mid for mid in messages if mid > message_id)
@@ -279,9 +285,25 @@ async def _search_pages(
     offset_id: int | None,
 ) -> SearchPage:
     rows, next_offset = await _search_rows(
-        client, peer, query, sender, since, until, limit, offset_id,
+        client, peer, query, sender, since, until, limit, offset_id or None,
     )
     return SearchPage([_message_hit(row, peer) for row in rows], next_offset)
+
+
+async def _search_start(
+    client: TelegramClient, peer: ChatPeer, until: datetime | None,
+) -> int | None:
+    if until is None:
+        return 0
+    timestamp = ceil(until.timestamp())
+    if timestamp <= 0:
+        return None
+    if timestamp >= 2**31:
+        return 0
+
+    # Resolve the upper date bound into an exclusive message ID cursor.
+    anchor = await _get_history(client, peer, offset_date=timestamp, limit=1)
+    return min(anchor[0].id + 1, 2**31 - 1) if anchor else None
 
 
 async def _search_rows(
@@ -294,23 +316,16 @@ async def _search_rows(
     limit: int,
     offset_id: int | None,
     after_message_id: int | None = None,
+    *,
+    max_batches: int = 4,
 ) -> tuple[list[types.Message], int | None]:
-    offset = offset_id or 0
-    if not offset and until is not None:
-        # GetHistory applies the upper date bound before text search, then older pages
-        # can use the stable message ID cursor without scanning newer hits again.
-        timestamp = ceil(until.timestamp())
-        if timestamp <= 0:
-            return [], None
-        if timestamp < 2**31:
-            anchor = await _get_history(client, peer, offset_date=timestamp, limit=1)
-            if not anchor:
-                return [], None
-            offset = min(anchor[0].id + 1, 2**31 - 1)
+    offset = await _search_start(client, peer, until) if offset_id is None else offset_id
+    if offset is None:
+        return [], None
 
     hits: list[types.Message] = []
     chat_id = utils.get_peer_id(peer)
-    for _ in range(4):
+    for _ in range(max_batches):
         result = await client(functions.messages.SearchRequest(
             peer=peer, q=query or "", from_id=sender, filter=types.InputMessagesFilterEmpty(),
             min_date=None, max_date=None, offset_id=offset, add_offset=0,
@@ -417,64 +432,59 @@ async def _get_exact_message(
     ), None)
 
 
-async def _reply_pages(
+async def _reply_page(
     client: TelegramClient, peer: ChatPeer, message_id: int, limit: int,
     offset_id: int | None, use_history: bool,
 ) -> ReplyPage:
     history = use_history or isinstance(peer, types.InputPeerChat)
     offset = offset_id or 0
     chat_id = utils.get_peer_id(peer)
-    hits: list[RichMessage] = []
-    for _ in range(4):
-        if history:
-            raw_rows = await _get_history(client, peer, offset_id=offset, limit=100)
-        else:
-            try:
-                result = await client(functions.messages.GetRepliesRequest(
-                    peer=peer, msg_id=message_id, offset_id=offset, offset_date=None,
-                    add_offset=0, limit=100, max_id=0, min_id=0, hash=0,
-                ))
-            except errors.BadRequestError as exc:
-                if not isinstance(exc, (
-                    errors.MsgIdInvalidError, errors.MessageIdInvalidError,
-                    errors.PeerIdInvalidError, errors.MethodInvalidError,
-                )) and exc.message != "TOPIC_ID_INVALID":
-                    raise
-                history = True
-                raw_rows = await _get_history(client, peer, offset_id=offset, limit=100)
-            else:
-                raw_rows = result.messages
-                # Channel comments can arrive from a linked discussion chat. Its
-                # message IDs belong to a different namespace, so restart locally.
-                foreign = any(
-                    row.peer_id is not None and utils.get_peer_id(row.peer_id) != chat_id
-                    for row in raw_rows
-                )
-                if foreign or (not raw_rows and offset == 0):
-                    history = True
-                    raw_rows = await _get_history(client, peer, offset_id=offset, limit=100)
-        rows = sorted(
-            (row for row in raw_rows if row.id > 0 and (not offset or row.id < offset)),
-            key=lambda row: row.id, reverse=True,
+    if history:
+        raw_rows = await _get_history(client, peer, offset_id=offset, limit=100)
+    else:
+        try:
+            result = await client(functions.messages.GetRepliesRequest(
+                peer=peer, msg_id=message_id, offset_id=offset, offset_date=None,
+                add_offset=0, limit=100, max_id=0, min_id=0, hash=0,
+            ))
+        except errors.BadRequestError as exc:
+            if not isinstance(exc, (
+                errors.MsgIdInvalidError, errors.MessageIdInvalidError,
+                errors.PeerIdInvalidError, errors.MethodInvalidError,
+            )) and exc.message != "TOPIC_ID_INVALID":
+                raise
+            return ReplyPage([], offset_id, True, "more")
+        raw_rows = result.messages
+        # Ignore channel comments returned from a linked discussion chat. They use a different ID space.
+        foreign = any(
+            row.peer_id is not None and utils.get_peer_id(row.peer_id) != chat_id
+            for row in raw_rows
         )
-        if not rows:
+        if foreign or (not raw_rows and offset == 0):
+            return ReplyPage([], offset_id, True, "more")
+
+    rows = sorted(
+        (row for row in raw_rows if row.id > 0 and (not offset or row.id < offset)),
+        key=lambda row: row.id, reverse=True,
+    )
+    if not rows:
+        return ReplyPage([], None, history, "complete")
+    hits: list[RichMessage] = []
+    for row in rows:
+        if row.id <= message_id:
             return ReplyPage(hits, None, history, "complete")
-        for row in rows:
-            if row.id <= message_id:
-                return ReplyPage(hits, None, history, "complete")
-            if not isinstance(row, types.Message) or row.peer_id is None:
-                continue
-            if utils.get_peer_id(row.peer_id) != chat_id:
-                continue
-            reply = row.reply_to
-            if not isinstance(reply, types.MessageReplyHeader) or (
-                reply.reply_to_msg_id != message_id or not _same_chat_reply(reply, chat_id)
-            ):
-                continue
-            if hits and hits[-1].message_id == row.id:
-                continue
-            if len(hits) == limit:
-                return ReplyPage(hits, hits[-1].message_id, history, "more")
-            hits.append(_rich_message(row, peer))
-        offset = rows[-1].id
-    return ReplyPage(hits, offset, history, "more")
+        if not isinstance(row, types.Message) or row.peer_id is None:
+            continue
+        if utils.get_peer_id(row.peer_id) != chat_id:
+            continue
+        reply = row.reply_to
+        if not isinstance(reply, types.MessageReplyHeader) or (
+            reply.reply_to_msg_id != message_id or not _same_chat_reply(reply, chat_id)
+        ):
+            continue
+        if hits and hits[-1].message_id == row.id:
+            continue
+        if len(hits) == limit:
+            return ReplyPage(hits, hits[-1].message_id, history, "more")
+        hits.append(_rich_message(row, peer))
+    return ReplyPage(hits, rows[-1].id, history, "more")
