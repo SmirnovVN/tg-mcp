@@ -57,14 +57,14 @@ class SearchProtocolTests(IsolatedAsyncioTestCase):
             SimpleNamespace(messages=[types.MessageEmpty(id=50, peer_id=None)]),
         ]
         page = await self.search.search(
-            self.chat_id, query="депозит", author=None, since=None, until=None, limit=2, offset_id=None,
+            self.chat_id, query="€500 deposit", author=None, since=None, until=None, limit=2, offset_id=None,
         )
 
         self.assertEqual(page.hits, [])
         self.assertEqual(page.next_offset_id, 50)
         requests = [call.args[0] for call in self.client.await_args_list]
         self.assertEqual([request.offset_id for request in requests], [0, 89, 70, 60])
-        self.assertTrue(all(request.peer is self.peer and request.q == "депозит" for request in requests))
+        self.assertTrue(all(request.peer is self.peer and request.q == "€500 deposit" for request in requests))
 
     async def test_repeated_id_does_not_consume_a_page_slot(self) -> None:
         self.client.side_effect = [
@@ -72,7 +72,7 @@ class SearchProtocolTests(IsolatedAsyncioTestCase):
             SimpleNamespace(messages=[self.message(70, 6)]),
         ]
         page = await self.search.search(
-            self.chat_id, query="депозит", author=None, since=None, until=None, limit=2, offset_id=None,
+            self.chat_id, query="€500 deposit", author=None, since=None, until=None, limit=2, offset_id=None,
         )
 
         self.assertEqual([hit.message_id for hit in page.hits], [90, 80])

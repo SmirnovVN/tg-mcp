@@ -108,13 +108,13 @@ class ServerTests(IsolatedAsyncioTestCase):
             )
             aliases = await client.call_tool("list_search_chats", {})
             result = await client.call_tool(
-                "search_messages", {"chat": "housing", "query": " депозит "}
+                "search_messages", {"chat": "housing", "query": " €500 deposit "}
             )
         self.assertFalse(aliases.is_error)
         self.assertEqual(aliases.structured_content["result"], ["community", "housing"])
         self.assertFalse(result.is_error)
         self.backend.search.assert_awaited_once_with(
-            -1009876543210, query="депозит", author=None, since=None, until=None,
+            -1009876543210, query="€500 deposit", author=None, since=None, until=None,
             limit=20, offset_id=None,
         )
 
@@ -138,7 +138,7 @@ class ServerTests(IsolatedAsyncioTestCase):
         date = datetime(2026, 3, 15, tzinfo=UTC)
         self.backend.search.side_effect = [
             SearchPage(hits=[], next_offset_id=543),
-            SearchPage(hits=[SearchHit(501, date, 12345, "Продолжение", None)], next_offset_id=None),
+            SearchPage(hits=[SearchHit(501, date, 12345, "Follow-up", None)], next_offset_id=None),
         ]
         request = {
             "chat": "community",
@@ -167,7 +167,7 @@ class ServerTests(IsolatedAsyncioTestCase):
     async def test_rejects_unknown_chat_and_unconstrained_search(self) -> None:
         async with Client(self.server, read_timeout_seconds=5) as client:
             for request in (
-                {"chat": "-1001234567890", "query": "депозит"},
+                {"chat": "-1001234567890", "query": "€500 deposit"},
                 {"chat": "community", "query": " "},
                 {"chat": "community", "author": "display name"},
                 {"chat": "community", "author": 12345, "limit": 51},
@@ -185,9 +185,9 @@ class ServerTests(IsolatedAsyncioTestCase):
     async def test_context_tool_checks_chat_and_window_then_returns_reply(self) -> None:
         date = datetime(2026, 3, 15, tzinfo=UTC)
         self.backend.get_context.return_value = MessageContext(
-            message=SearchHit(12, date, 12345, "Три недели", None),
+            message=SearchHit(12, date, 12345, "Three weeks", None),
             before=[], after=[],
-            replied_to=SearchHit(4, date, 23456, "Сколько ждали запись?", None),
+            replied_to=SearchHit(4, date, 23456, "How long did you wait for an appointment?", None),
         )
         async with Client(self.server, read_timeout_seconds=5) as client:
             for request in (

@@ -1,10 +1,10 @@
 # tg-mcp
 
-`tg-mcp` — локальный MCP-сервер для поиска по чатам Telegram из Codex. Список чатов задаётся в `config.toml`. Сервер ищет по ключевым словам и автору через Telegram API и возвращает текст, дату, идентификатор автора и ссылку на сообщение, если она доступна.
+`tg-mcp` is a local MCP server that lets Codex search Telegram chats. Configure the chat list in `config.toml`. The server searches by keyword and author through the Telegram API and returns the message text, date, author ID, and a link when available.
 
-## Установка
+## Installation
 
-Понадобятся Python 3.11 или новее, аккаунт Telegram и `api_id` с `api_hash` из [Telegram API development tools](https://my.telegram.org/apps). Выполняйте команды из папки проекта.
+You need Python 3.11 or later, a Telegram account, and an `api_id` and `api_hash`. Run the commands from the project directory. [Telegram API development tools](https://my.telegram.org/apps)
 
 Windows (PowerShell)
 
@@ -13,29 +13,29 @@ py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
-Linux и macOS
+Linux and macOS
 
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
 ```
 
-После активации установите проект и закреплённые версии зависимостей:
+Activate the environment and install the project with its pinned dependencies.
 
 ```console
 python -m pip install -r requirements.txt .
 ```
 
-При первой настройке скопируйте `config.example.toml` в `config.toml` и заполните `api_id` и `api_hash` в секции `[telegram]`. Путь `session` задаётся относительно папки этого файла. Команда `login` запросит код и пароль двухэтапной аутентификации, если он включён.
+For the initial setup, copy `config.example.toml` to `config.toml` and fill in `api_id` and `api_hash` under `[telegram]`. The `session` path is relative to the directory containing the configuration file. The `login` command prompts for a login code and, if you enabled two-step verification, your password.
 
-`tg-mcp` и `tg-mcp-setup` по умолчанию читают `config.toml` из текущей папки. Для другого файла укажите `--config`, например `tg-mcp-setup --config config.local.toml chats`.
+By default, `tg-mcp` and `tg-mcp-setup` read `config.toml` from the current directory. Use `--config` to select a different file, as in `tg-mcp-setup --config config.local.toml chats`.
 
 ```console
 tg-mcp-setup login
 tg-mcp-setup chats --toml
 ```
 
-Команда `chats` заполняет кеш идентификаторов сессии. С флагом `--toml` она выводит готовую секцию `[chats]` с названиями в комментариях и сохраняет заданные псевдонимы. Оставьте строки нужных чатов и замените секцию в `config.toml`. Чтобы добавить только новые чаты, вставьте их строки под существующим заголовком `[chats]`.
+The `chats` command caches chat IDs in the session. With `--toml`, it prints a ready-to-paste `[chats]` section, adds chat titles as comments, and preserves aliases already in your configuration. Keep the entries you want and replace the section in `config.toml`. To add chats to an existing list, paste their entries under the existing `[chats]` heading.
 
 ```toml
 [chats]
@@ -43,62 +43,62 @@ community = -1001234567890
 housing = -1009876543210
 ```
 
-`config.toml` и файл `.session` содержат данные доступа. Оба исключены из Git при использовании имён из примера. Команды настройки и MCP используют одну сессию и блокируют её на время работы. Если сессия занята, остановите использующий её процесс и повторите команду.
+`config.toml` and the `.session` file contain credentials. Git ignores both when you use the example filenames. The setup commands and the MCP server share the same Telegram session and lock it while in use. If the session is busy, stop the process using it and retry.
 
-## Запуск и подключение к Codex
+## Run the server and connect Codex
 
-Один процесс `tg-mcp` держит Telegram-сессию и принимает запросы от нескольких чатов Codex одновременно по Streamable HTTP. Все клиенты используют один список разрешённых Telegram-чатов.
+One `tg-mcp` process holds the Telegram session and serves requests from multiple Codex chats concurrently over Streamable HTTP. All clients share the same list of allowed Telegram chats.
 
-1. Задайте секцию `[http]` в файле проекта `config.toml`. Сгенерируйте значение для `token` командой `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+1. Add an `[http]` section to the project's `config.toml`. Generate a `token` with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 
    ```toml
    [http]
    port = 8765
-   token = "вставьте-сгенерированный-токен"
+   token = "replace-with-your-generated-token"
    ```
 
-2. Остановите прежний процесс `tg-mcp`, если он использует ту же Telegram-сессию. Запустите сервер из папки проекта и оставьте его работать. Он слушает только `127.0.0.1` и требует токен в каждом запросе.
+2. Stop any existing `tg-mcp` process that uses the same Telegram session. Start the server from the project directory and leave it running. It listens only on `127.0.0.1` and requires the token on every request.
 
    ```console
    tg-mcp
    ```
 
-3. Добавьте секцию `[mcp_servers.telegram]` в конфигурацию Codex или замените существующую секцию целиком. Используйте тот же токен и порт, что в файле проекта, затем запустите Codex. [Настройки MCP в Codex](https://learn.chatgpt.com/docs/config-file/config-reference#mcp-servers)
+3. Add the `[mcp_servers.telegram]` section to your Codex configuration or replace the existing section. Use the same token and port as in the project's configuration, then launch Codex. [Codex MCP settings](https://learn.chatgpt.com/docs/config-file/config-reference#mcp-servers)
 
    ```toml
    [mcp_servers.telegram]
    url = "http://127.0.0.1:8765/mcp"
-   http_headers = { Authorization = "Bearer вставьте-сгенерированный-токен" }
+   http_headers = { Authorization = "Bearer replace-with-your-generated-token" }
    startup_timeout_sec = 25
    ```
 
-Чтобы подхватить новый список Telegram-чатов, перезапустите процесс сервера. Перед запуском `tg-mcp-setup` остановите его через Ctrl+C, чтобы освободить сессию.
+Restart the server to load changes to the Telegram chat list. Before running `tg-mcp-setup`, stop the server with Ctrl+C to release the session.
 
-## Поиск
+## Search
 
-- `list_search_chats()` возвращает только имена из `[chats]`.
-- `search_messages(chat, query?, author?, since?, until?, limit?, offset_id?)` ищет в одном чате. Укажите `query`, `author` или оба параметра. `author` принимает числовой Telegram ID пользователя или точный `@username`. `since` включается в диапазон, `until` исключается. Используйте дату и время с часовым поясом. Размер страницы от 1 до 50.
-- `get_message_context(chat, message_id, before=5, after=5)` возвращает реплику, контекст до и после неё и сообщение, на которое ответили внутри того же чата, даже если оно лежит вне окна. Возьмите имя чата и ID из результата поиска. Окно запрашивает от 0 до 20 записей истории с каждой стороны. Результат может быть короче, если в окне есть служебные или недоступные сообщения. В форумах окно показывает общую хронологию чата.
-- Для следующей страницы `search_messages` передайте `next_offset_id` как `offset_id` и сохраните остальные фильтры. Продолжайте до `next_offset_id: null`, даже если промежуточная страница пуста.
+- `list_search_chats()` returns only the aliases under `[chats]`.
+- `search_messages(chat, query?, author?, since?, until?, limit?, offset_id?)` searches one chat. Provide `query`, `author`, or both. The `author` filter accepts a numeric Telegram user ID or an exact `@username`. The `since` bound is inclusive and `until` is exclusive. Use timestamps with time zones. Page sizes range from 1 to 50.
+- `get_message_context(chat, message_id, before=5, after=5)` returns the message, nearby messages, and the same-chat message it replied to, even if that message lies outside the window. Take the chat alias and ID from the search result. You can request between 0 and 20 history entries on either side. Service messages and unavailable entries may shorten the result. In forums, the window follows the entire chat's timeline.
+- To fetch the next page from `search_messages`, pass `next_offset_id` as `offset_id` and keep the other filters fixed. Continue until `next_offset_id` is `null`, even if an intermediate page is empty.
 
-Примеры запросов к Codex:
+Example prompts for Codex
 
-> В чатах `community` и `housing` найди сообщения про депозит за последние три месяца. Укажи дату, чат и ссылку для каждого случая.
+> Find messages about deposits in `community` and `housing` from the last three months. Include the date, chat, and link for each case.
 
-> Собери хронологию сообщений пользователя `@example` в чате `community` с 1 января по 1 апреля по московскому времени. Пройди все страницы за этот период. Укажи ссылки на сообщения и даты, которые покрывает поиск.
+> Build a timeline of messages from `@example` in `community` from January 1 to April 1, Moscow time. Read every page in that range. Include message links and the dates covered by the search.
 
-Для длинных историй используйте числовой `sender_id` из результатов. Он сохраняется при смене `@username`. По числовому ID Telethon обычно может найти только пользователя, с которым эта сессия уже встречалась. Если ID недоступен, попробуйте текущий `@username`. Поиск покрывает историю, доступную вашей сессии в выбранных чатах. [Как Telethon разрешает ID](https://docs.telethon.dev/en/stable/concepts/entities.html#entities-vs-input-entities)
+For searches over longer periods, use the numeric `sender_id` from your results. It stays the same when a user changes their `@username`. Telethon can usually resolve a numeric ID only if the session has already encountered that user. If the ID is unavailable, try their current `@username`. Searches cover the history your session can access in the selected chats. [How Telethon resolves IDs](https://docs.telethon.dev/en/stable/concepts/entities.html#entities-vs-input-entities)
 
-### Несколько чатов и фраз
+### Search multiple chats and phrases
 
-`search_messages_multi` ищет по любой фразе и возвращает уникальные сообщения от новых к старым. Лимит относится ко всей странице. Можно указать до восьми чатов, до восьми фраз и не более 32 их сочетаний. Псевдонимы возьмите из `list_search_chats`. Верхняя граница фиксируется при первом вызове.
+`search_messages_multi` searches for any of the supplied phrases and returns unique messages, newest first. The limit applies to the whole page. You can specify up to eight chats, up to eight phrases, and up to 32 chat–phrase pairs. Get aliases from `list_search_chats`. The first call fixes the upper date bound.
 
-Пример аргументов поиска за 90 дней до 19 ноября 2026 года.
+The following example covers the 90 days before November 19, 2026.
 
 ```json
 {
   "chats": ["chat_a", "chat_b", "chat_c"],
-  "queries": ["языковая виза", "пришёл термин", "дозапрос", "перенёс курс"],
+  "queries": ["language course visa", "got an appointment", "request for more documents", "rescheduled my course"],
   "since": "2026-08-21T00:00:00+03:00",
   "until": "2026-11-19T00:00:00+03:00",
   "limit": 20,
@@ -106,21 +106,21 @@ housing = -1009876543210
 }
 ```
 
-Чтобы искать по одному человеку во всех выбранных чатах, добавьте в запрос `author` с числовым `sender_id` из предыдущего результата.
+To search for one person across the selected chats, pass their numeric `sender_id` from an earlier result as `author`.
 
-Для первичного просмотра используйте небольшой `limit` и `max_text_chars`. Поле `max_text_chars` ограничивает длину текста или подписи в каждом результате. Значение `0` оставляет только метаданные. При сокращении `content_truncated` равен `true`, а источник совпадения определяется по полному сообщению. Если параметр пропущен, выдача содержит полный доступный текст. Чтобы прочитать целое сообщение из короткой выдачи, передайте его `chat` и `message_id` в `get_message_story`.
+For a first pass, use a small `limit` and set `max_text_chars` to cap the text or caption in each hit. A value of `0` returns only metadata. When content is shortened, `content_truncated` is `true`. The tool still checks the full message to determine the match source. Omit the cap to return all available text. To read a full message from a shortened result, pass its `chat` and `message_id` to `get_message_story`.
 
-На каждой странице `matched_queries` перечисляет запросы, по которым Telegram вернул сообщение. `match_sources` показывает, что фраза буквально видна в тексте или подписи, либо указывает `unknown`. Поля `message_type`, `text`, `caption` и `text_status` показывают содержимое, доступное MCP. У медиа без текста и подписи `text_status` равен `absent`. Поле `url` содержит ссылку, если для сообщения её можно построить. [Поиск Telegram](https://core.telegram.org/method/messages.search), [Поля сообщения Telegram](https://core.telegram.org/constructor/message)
+For each hit, `matched_queries` lists the searches that returned it. `match_sources` marks each phrase as literally present in the text or caption, or as `unknown`. The `message_type`, `text`, `caption`, and `text_status` fields describe the content available to the server. For media without visible text or a caption, `text_status` is `absent`. The `url` field contains a message link when the server can build one. [Telegram search](https://core.telegram.org/method/messages.search) · [Telegram message fields](https://core.telegram.org/constructor/message)
 
-Для продолжения передайте `{"cursor":"<next_cursor>"}` тому же инструменту. Продолжайте даже после короткой или пустой страницы, пока курсор присутствует. Курсоры действуют до 30 минут, могут вытесняться при большом числе запросов и прекращают действовать после перезапуска.
+To continue, pass `{"cursor":"<next_cursor>"}` to the same tool. Keep going while a cursor is present, even after a short or empty page. Cursors are valid for up to 30 minutes. They may be evicted under heavy use and expire when the server restarts.
 
-При `partial: true` поле `errors` указывает, какие пары чата и фразы прервались. Если есть `retry_cursor`, сохраните его со страницы ошибки и используйте после указанного `retry_after_seconds`, когда Telegram задал задержку. Ветка повтора возвращает свой порядок. При сведении двух списков объедините найденные сообщения по `(chat, message_id)` и соберите все `matched_queries`.
+When `partial` is `true`, `errors` identifies the chat–phrase pairs that failed. If a page provides a `retry_cursor`, save it. When Telegram specifies a `retry_after_seconds` delay, wait that long before retrying. The retry results have their own ordering. When merging both lists, deduplicate by `(chat, message_id)` and combine all `matched_queries`.
 
-### История сообщения
+### Message story
 
-`get_message_story` возвращает исходное сообщение, доступное родительское сообщение и `replies` с явными прямыми ответами в настроенном чате. Необязательный `follow_up` ищет более поздние реплики того же автора по фразам в этом чате. Такая реплика может относиться к другому заявлению.
+`get_message_story` returns the original message, the message it replied to when available, and its direct `replies` in the configured chat. The optional `follow_up` searches in the same chat for later messages by the same author that match the supplied phrases. Those matches may refer to a different application.
 
-Пример аргументов для результата с ID 12345.
+The following example opens result 12345 and looks for follow-up messages.
 
 ```json
 {
@@ -128,7 +128,7 @@ housing = -1009876543210
   "message_id": 12345,
   "replies_limit": 5,
   "follow_up": {
-    "queries": ["получил визу", "дозапрос", "отказ"],
+    "queries": ["got my visa", "request for more documents", "visa refusal"],
     "until": "2026-11-19T00:00:00+03:00",
     "limit": 10,
     "max_text_chars": 300
@@ -136,23 +136,23 @@ housing = -1009876543210
 }
 ```
 
-`replies.status` равен `more`, пока доступна следующая страница ответов, даже если текущая страница пустая. При сбое статус `partial` означает, что часть ответов удалось получить, а `failed` означает, что страница прервалась до первого ответа. Передавайте `replies.next_cursor` и `replies.retry_cursor` в `get_message_story`. Если Telegram не может вернуть ветку, инструмент просматривает историю этого чата порциями. [Ветки ответов Telegram](https://core.telegram.org/method/messages.getReplies)
+`replies.status` is `more` while another page is available, even if the current page is empty. On error, `partial` means the page contains some replies, while `failed` means the page stopped before it could return any. Pass `replies.next_cursor` and `replies.retry_cursor` to `get_message_story`. If Telegram cannot return the reply thread, the tool scans the chat history in batches. [Telegram reply threads](https://core.telegram.org/method/messages.getReplies)
 
-Сохраните текст исходной и родительской реплик и выдачу `follow_up` из первого ответа. На следующих страницах прямых ответов `context_text_included` равен `false`. Для исходной и родительской реплик там остаются метаданные, а текст новых ответов возвращается целиком. Курсоры внутри `follow_up.result` передавайте в `search_messages_multi`. Если запрос родительского сообщения завершился ошибкой, `parent_status` равен `failed`, а причина указана в `parent_error`. Исходное сообщение остаётся доступно.
+Save the original message, the parent message, and the `follow_up` results from the first response. On subsequent reply pages, `context_text_included` is `false`. Those pages keep the original and parent message metadata and return the full text of new replies. Pass cursors from `follow_up.result` to `search_messages_multi`. If the parent lookup fails, `parent_status` is `failed` and `parent_error` gives the reason. The original message is still available.
 
-**Полнота.** Выдача зависит от поиска Telegram и истории, доступной текущей сессии. Редактирование и удаление сообщений между страницами могут менять результаты. Ссылки открывают оригиналы в Telegram с учётом его настроек доступа. Совпадения без видимого текста могут остаться без известного источника.
+**Coverage.** Results depend on Telegram search and the history the current session can access. Edits and deletions between pages can change the results. Telegram enforces its own access controls when opening message links. The match source may be unknown for messages without visible text.
 
-## Проверка
+## Tests
 
-Для разработки установите пакет в активированное окружение в режиме `-e`. Тесты будут использовать текущий код из `src/`.
+For development, install the package in editable mode in the active environment. The tests then use the current code under `src/`.
 
 ```console
 python -m pip install -e .
 python -m unittest discover -s tests -v
 ```
 
-Тесты используют подставные ответы Telegram. Они проверяют разрешённые чаты, совместимость старых инструментов, общую пагинацию, повтор после ошибок, ответы и медиа без текста.
+The tests use mocked Telegram responses. They cover the chat allowlist, compatibility with the original tools, pagination, retries, replies, and media without text.
 
-## Лицензия
+## License
 
 [MIT](LICENSE)
