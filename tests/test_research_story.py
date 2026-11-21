@@ -68,10 +68,10 @@ class ResearchStoryTests(IsolatedAsyncioTestCase):
         )
         self.backend.get_story_parent.return_value = parent
         self.backend.get_story_replies.side_effect = [
-            *(ReplyPage([], offset, True, "more") for offset in (120, 115, 110, 105, 100, 99, 98, 95)),
+            *(ReplyPage([], offset, True, "more", 100) for offset in (120, 115, 110, 105, 100, 99, 98, 95)),
             ReplyPage(
                 hits=[self.message(90), self.message(90), self.message(50), self.message(40)],
-                next_offset_id=None, use_history=True, status="complete",
+                next_offset_id=None, use_history=True, status="complete", rows_scanned=4,
             ),
         ]
         follow_up = FollowUp(("visa",), None, self.date + timedelta(days=1), 5)
@@ -86,6 +86,11 @@ class ResearchStoryTests(IsolatedAsyncioTestCase):
             self.assertIsNone(page.replies.retry_cursor)
         self.assertEqual([hit.message_id for hit in third.replies.hits], [90])
         self.assertEqual(third.replies.status, "complete")
+        self.assertEqual([p.replies.rows_scanned for p in (first, second, third)], [400, 800, 804])
+        self.assertEqual([p.replies.resume_before_id for p in (first, second, third)], [105, 95, None])
+        self.assertEqual(third.replies.scan_mode, "chat_history")
+        self.assertEqual([p.replies.stop_reason for p in (first, second, third)],
+                         ["batch_budget", "batch_budget", "complete"])
         self.assertEqual(third.replies.hits[0].text, "message 90")
         self.assertTrue(first.context_text_included)
         self.assertEqual(first.message.caption, "photo caption")
@@ -143,9 +148,9 @@ class ResearchStoryTests(IsolatedAsyncioTestCase):
 
     async def test_later_reply_timeout_preserves_hits_and_retries_from_last_checkpoint(self) -> None:
         self.backend.get_story_replies.side_effect = [
-            ReplyPage([self.message(90)], 90, False, "more"),
+            ReplyPage([self.message(90)], 90, False, "more", 8),
             TimeoutError(),
-            ReplyPage([self.message(70)], None, False, "complete"),
+            ReplyPage([self.message(70)], None, False, "complete", 2),
         ]
 
         partial = await self.research.get_story("community", self.chat_id, 50, replies_limit=2)
@@ -154,6 +159,8 @@ class ResearchStoryTests(IsolatedAsyncioTestCase):
         self.assertEqual([hit.message_id for hit in partial.replies.hits], [90])
         self.assertEqual(partial.replies.status, "partial")
         self.assertEqual(partial.replies.error_code, "timeout")
+        self.assertEqual(partial.replies.issue.code, "timeout")
+        self.assertEqual((partial.replies.rows_scanned, retried.replies.rows_scanned), (8, 10))
         self.assertIsNone(partial.replies.next_cursor)
         self.assertEqual([hit.message_id for hit in retried.replies.hits], [70])
         self.assertEqual(retried.replies.status, "complete")

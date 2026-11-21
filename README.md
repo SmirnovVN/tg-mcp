@@ -74,6 +74,10 @@ One `tg-mcp` process holds the Telegram session and serves requests from multipl
 
 Restart the server to load changes to the Telegram chat list. Before running `tg-mcp-setup`, stop the server with Ctrl+C to release the session.
 
+For diagnostics, start the server with `tg-mcp --diagnostics`. Each tool call gets an ID in stderr. Its log entries show the Telegram method, elapsed milliseconds, reported wait, and whether the request was dispatched to Telethon or blocked by a cooldown. The tool summary counts dispatches to Telethon. Created and consumed cursors have matching fingerprints. Logs omit message text, search phrases and usable cursors.
+
+All clients share four request slots for one Telegram session. When Telegram returns a flood wait, new calls to the affected method receive the remaining delay locally until the wait expires. Calls already in flight can still receive a flood wait of their own.
+
 ## Search
 
 - `list_search_chats()` returns only the aliases under `[chats]`.
@@ -92,6 +96,8 @@ For searches over longer periods, use the numeric `sender_id` from your results.
 ### Search multiple chats and phrases
 
 `search_messages_multi` searches for any of the supplied phrases and returns unique messages, newest first. The limit applies to the whole page. You can specify up to eight chats, up to eight phrases, and up to 32 chat–phrase pairs. Get aliases from `list_search_chats`. The first call fixes the upper date bound.
+
+The page limit for search, direct replies and follow-up search is 1–50. The default is 20.
 
 The following example covers the 90 days before November 19, 2026.
 
@@ -116,6 +122,21 @@ To continue, pass `{"cursor":"<next_cursor>"}` to the same tool. Keep going whil
 
 When `partial` is `true`, `errors` identifies the chat–phrase pairs that failed. If a page provides a `retry_cursor`, save it. When Telegram specifies a `retry_after_seconds` delay, wait that long before retrying. The retry results have their own ordering. When merging both lists, deduplicate by `(chat, message_id)` and combine all `matched_queries`.
 
+Track failed streams by `stream_id` across both branches. An error with `inherited: true` records a failure from an earlier page on that branch. Use new errors to schedule retries. A recovery page lists a stream in `completed_stream_ids` when it has exhausted that stream. Keep that completion even if another branch subsequently reports the inherited error. Follow both branches until their cursors run out.
+
+A client can merge pages from both branches in any order.
+
+```python
+matches, failed, recovered = {}, set(), set()
+for page in pages:
+    for hit in page["hits"]:
+        key = (hit["chat"], hit["message_id"])
+        matches.setdefault(key, {}).update(hit["match_sources"])
+    failed.update(issue["stream_id"] for issue in page["errors"])
+    recovered.update(page["completed_stream_ids"])
+outstanding = failed - recovered
+```
+
 ### Message story
 
 `get_message_story` returns the original message, the message it replied to when available, and its direct `replies` in the configured chat. The optional `follow_up` searches in the same chat for later messages by the same author that match the supplied phrases. Those matches may refer to a different application.
@@ -139,6 +160,10 @@ The following example opens result 12345 and looks for follow-up messages.
 `replies.status` is `more` while another page is available, even if the current page is empty. On error, `partial` means the page contains some replies, while `failed` means the page stopped before it could return any. Pass `replies.next_cursor` and `replies.retry_cursor` to `get_message_story`. If Telegram cannot return the reply thread, the tool scans the chat history in batches. [Telegram reply threads](https://core.telegram.org/method/messages.getReplies)
 
 Save the original message, the parent message, and the `follow_up` results from the first response. On subsequent reply pages, `context_text_included` is `false`. Those pages keep the original and parent message metadata and return the full text of new replies. Pass cursors from `follow_up.result` to `search_messages_multi`. If the parent lookup fails, `parent_status` is `failed` and `parent_error` gives the reason. The original message is still available.
+
+`replies.scan_mode` identifies a reply-thread lookup (`reply_thread`) or a scan of local chat history (`chat_history`). `rows_scanned` counts row inspections along this cursor chain, including pages that found no direct replies. `stop_reason` explains why a page ended, for example `batch_budget`, `time_budget`, `limit`, or `rate_limited`. `resume_before_id` is the exclusive position for the next scan when one has been established. Telegram does not supply a reliable count of the remaining inspections. Use the opaque cursor to continue.
+
+For whole-call errors, `search_messages_multi` and `get_message_story` return MCP `isError` with `code`, `message`, `retry_after_seconds` and `retry_cursor` in the structured result and in the JSON text fallback. A temporary failure reading the original message includes a cursor for the original request and its filters. Pass it back as `cursor` after the delay. For errors within a successful page, read the same error details from a search entry in `errors`, from `parent_error`, or from `replies.issue`. The reply cursor stays under `replies`.
 
 **Coverage.** Results depend on Telegram search and the history the current session can access. Edits and deletions between pages can change the results. Telegram enforces its own access controls when opening message links. The match source may be unknown for messages without visible text.
 

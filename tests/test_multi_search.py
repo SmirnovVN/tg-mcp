@@ -88,14 +88,80 @@ class MultiSearchTests(IsolatedAsyncioTestCase):
             self.assertTrue(result["partial"])
             self.assertEqual(result["errors"][0]["chat"], "b")
             self.assertEqual(result["errors"][0]["retry_after_seconds"], 15)
-            rest = await self.call(client, {"cursor": result["next_cursor"]})
-            self.assertTrue(rest["partial"])
-            self.assertEqual([hit["message_id"] for hit in rest["hits"]], [40])
-            self.assertIsNone(rest["next_cursor"])
+            issue = result["errors"][0]
+            self.assertFalse(issue["inherited"])
             available = True
             retry = await self.call(client, {"cursor": result["retry_cursor"]})
             self.assertFalse(retry["partial"])
+            self.assertEqual(retry["completed_stream_ids"], [issue["stream_id"]])
             self.assertEqual([hit["message_id"] for hit in retry["hits"]], [190])
+            rest = await self.call(client, {"cursor": result["next_cursor"]})
+            self.assertTrue(rest["partial"])
+            self.assertEqual(rest["errors"], [{**issue, "inherited": True}])
+            self.assertEqual([hit["message_id"] for hit in rest["hits"]], [40])
+            self.assertIsNone(rest["next_cursor"])
+
+    async def test_overlap_across_retry_branches_preserves_both_matches(self) -> None:
+        hit = self.message(42, 12, "visa appointment")
+        self.backend.search_rich.side_effect = [
+            RichSearchPage([hit], None), TelegramSearchError("Wait.", code="rate_limited", retry_after_seconds=4),
+            RichSearchPage([hit], None),
+        ]
+        async with Client(self.server) as client:
+            first = await self.call(client, {"chats": ["a"], "queries": ["visa", "appointment"]})
+            retry = await self.call(client, {"cursor": first["retry_cursor"]})
+        merged = {}
+        for row in first["hits"] + retry["hits"]:
+            merged.setdefault((row["chat"], row["message_id"]), set()).update(row["matched_queries"])
+        self.assertEqual(merged, {("a", 42): {"visa", "appointment"}})
+        self.assertEqual(retry["completed_stream_ids"], [first["errors"][0]["stream_id"]])
+
+    async def test_limit_schema_and_structured_validation_error(self) -> None:
+        async with Client(self.server) as client:
+            schemas = {tool.name: tool.input_schema for tool in (await client.list_tools()).tools}
+            for tool, field in (("search_messages_multi", "limit"), ("get_message_story", "replies_limit")):
+                variants = schemas[tool]["properties"][field]["anyOf"]
+                numeric = next(item for item in variants if item["type"] == "integer")
+                self.assertEqual((numeric["minimum"], numeric["maximum"]), (1, 50))
+            self.backend.search_rich.return_value = RichSearchPage([], None)
+            for limit in (0, 1, 50, 60):
+                result = await client.call_tool("search_messages_multi", {"chats": ["a"], "queries": ["visa"], "limit": limit})
+                self.assertEqual(result.is_error, limit in (0, 60))
+                if result.is_error:
+                    self.assertEqual(result.structured_content["code"], "invalid_arguments")
+                    self.assertIn("limit", result.content[0].text)
+
+    async def test_story_can_resume_after_anchor_flood_wait(self) -> None:
+        self.backend.get_story_anchor.side_effect = [
+            TelegramSearchError("Wait.", code="rate_limited", retry_after_seconds=18),
+            TelegramSearchError("Wait.", code="rate_limited", retry_after_seconds=3),
+            StoryAnchor(self.message(50, 10, "filed"), None, "none", True),
+        ]
+        self.backend.get_story_replies.return_value = ReplyPage([], None, False, "complete")
+        async with Client(self.server, mode="legacy") as first, Client(self.server) as other:
+            failed = await first.call_tool("get_message_story", {"chat": "a", "message_id": 50})
+            self.assertTrue(failed.is_error)
+            detail = failed.structured_content
+            self.assertEqual((detail["code"], detail["retry_after_seconds"]), ("rate_limited", 18))
+            args = {"cursor": detail["retry_cursor"]}
+            early = await other.call_tool("get_message_story", args)
+            self.assertEqual(early.structured_content["retry_cursor"], args["cursor"])
+            self.assertEqual(early.structured_content["retry_after_seconds"], 3)
+            recovered = await self.call(other, args, "get_message_story")
+            self.assertEqual(recovered["message"]["message_id"], 50)
+            self.assertEqual(recovered["replies"]["status"], "complete")
+            self.assertEqual(await self.call(first, args, "get_message_story"), recovered)
+
+    async def test_unexpected_failure_is_logged_without_exception_contents(self) -> None:
+        self.backend.get_story_anchor.side_effect = RuntimeError("private exception text")
+        with self.assertLogs("tg_mcp.diagnostics", level="ERROR") as logs:
+            async with Client(self.server) as client:
+                result = await client.call_tool("get_message_story", {"chat": "a", "message_id": 50})
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content["code"], "internal_error")
+        output = "\n".join(logs.output)
+        self.assertIn("tool=get_message_story error_type=RuntimeError", output)
+        self.assertNotIn("private exception text", output + result.content[0].text)
 
     async def test_empty_continuable_stream_does_not_lose_buffered_messages(self) -> None:
         async def search(chat_id, *, offset_id, **_filters):

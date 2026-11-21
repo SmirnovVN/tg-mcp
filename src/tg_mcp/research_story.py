@@ -23,6 +23,13 @@ class FollowUp:
 
 
 @dataclass(frozen=True)
+class StoryError:
+    message: str
+    code: str
+    retry_after_seconds: int | None = None
+
+
+@dataclass(frozen=True)
 class StoryReplies:
     relationship: Literal["direct_replies"]
     hits: list[RichMessage]
@@ -32,6 +39,11 @@ class StoryReplies:
     error: str | None
     error_code: str | None
     retry_after_seconds: int | None
+    scan_mode: Literal["chat_history", "reply_thread"]
+    stop_reason: str
+    rows_scanned: int
+    resume_before_id: int | None
+    issue: StoryError | None
 
 
 @dataclass(frozen=True)
@@ -42,13 +54,6 @@ class StoryFollowUp:
     until: datetime
     result: MultiSearchResult | None
     reason: str | None
-
-
-@dataclass(frozen=True)
-class StoryError:
-    message: str
-    code: str
-    retry_after_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +77,7 @@ class _StoryPage:
     offset_id: int | None = None
     use_history: bool = False
     parent_error: StoryError | None = None
+    rows_scanned: int = 0
 
 
 @dataclass(frozen=True)
@@ -81,6 +87,8 @@ class _ReplyRead:
     offset_id: int | None
     use_history: bool
     error: StoryError | None
+    rows_scanned: int
+    stop_reason: str
 
 
 class ResearchStory:
@@ -104,9 +112,23 @@ class ResearchStory:
         replies_limit: int = 20,
         follow_up: FollowUp | None = None,
     ) -> StoryResult:
-        async with asyncio.timeout(REQUEST_TIMEOUT), self._requests:
-            anchor = await self._backend.get_story_anchor(chat_id, message_id)
-        state = _StoryPage(chat, chat_id, anchor, replies_limit, use_history=anchor.use_history)
+        async def load() -> StoryResult:
+            try:
+                async with asyncio.timeout(REQUEST_TIMEOUT), self._requests:
+                    anchor = await self._backend.get_story_anchor(chat_id, message_id)
+            except TimeoutError:
+                raise TelegramSearchError("Telegram could not read the original message in time.", code="timeout") from None
+            state = _StoryPage(chat, chat_id, anchor, replies_limit, use_history=anchor.use_history)
+            return await self._first_page(state, follow_up)
+
+        try:
+            return await load()
+        except TelegramSearchError as exc:
+            if exc.retryable:
+                exc.retry_cursor = self._pages.add(load, kind="retry")
+            raise
+
+    async def _first_page(self, state: _StoryPage, follow_up: FollowUp | None) -> StoryResult:
         parent, replies, author_result = await asyncio.gather(
             self._read_parent(state),
             self._read_replies(state),
@@ -116,7 +138,12 @@ class ResearchStory:
         return self._result(replace(state, anchor=anchor, parent_error=parent_error), replies, author_result)
 
     async def resume(self, cursor: str) -> StoryResult:
-        return await self._pages.get(cursor)
+        try:
+            return await self._pages.get(cursor)
+        except TelegramSearchError as exc:
+            if exc.retryable:
+                exc.retry_cursor = cursor
+            raise
 
     async def _read_parent(self, state: _StoryPage) -> tuple[StoryAnchor, StoryError | None]:
         anchor = state.anchor
@@ -141,11 +168,14 @@ class ResearchStory:
         offset = state.offset_id
         use_history = state.use_history
         status = "more"
+        stop_reason = "batch_budget"
         error = None
+        scanned = state.rows_scanned
         loop = asyncio.get_running_loop()
         deadline = loop.time() + PAGE_TIMEOUT
         for _ in range(REPLY_BATCH_BUDGET):
             if loop.time() >= deadline:
+                stop_reason = "time_budget"
                 break
             page_budget = asyncio.timeout_at(deadline)
             try:
@@ -161,10 +191,13 @@ class ResearchStory:
                 error = StoryError(str(exc), exc.code, exc.retry_after_seconds)
                 break
             except TimeoutError:
-                if not page_budget.expired():
+                if page_budget.expired():
+                    stop_reason = "time_budget"
+                else:
                     error = StoryError("Telegram replies timed out. Retry this reply page.", "timeout")
                 break
 
+            scanned += page.rows_scanned
             hits.update({
                 hit.message_id: hit for hit in page.hits
                 if hit.message_id > anchor.message_id and hit.date >= anchor.date
@@ -172,10 +205,13 @@ class ResearchStory:
             })
             status = page.status
             if status != "more":
+                stop_reason = status
+                use_history = page.use_history
                 break
             next_offset = page.next_offset_id
             if next_offset is not None and next_offset <= anchor.message_id:
                 status = "complete"
+                stop_reason = "complete"
                 break
             offset_moved = next_offset is not None and (offset is None or next_offset < offset)
             entered_history = page.use_history and not use_history and next_offset == offset
@@ -184,13 +220,15 @@ class ResearchStory:
                 break
             offset, use_history = next_offset, page.use_history
             if len(hits) >= state.replies_limit:
+                stop_reason = "limit"
                 break
 
         if error is not None:
             status = "partial" if hits else "failed"
+            stop_reason = error.code
         return _ReplyRead(
             sorted(hits.values(), key=lambda hit: hit.message_id, reverse=True),
-            status, offset, use_history, error,
+            status, offset, use_history, error, scanned, stop_reason,
         )
 
     async def _read_follow_up(
@@ -247,8 +285,10 @@ class ResearchStory:
                     message=replace(anchor.message, text=None, caption=None),
                     replied_to=replace(parent, text=None, caption=None) if parent is not None else None,
                 )
-            continuation = replace(state, anchor=anchor, offset_id=page.offset_id, use_history=page.use_history)
-            cursor = self._pages.add(lambda: self._resume_page(continuation))
+            continuation = replace(state, anchor=anchor, offset_id=page.offset_id, use_history=page.use_history,
+                                   rows_scanned=page.rows_scanned)
+            cursor = self._pages.add(lambda: self._resume_page(continuation),
+                                     kind="next" if page.status == "more" else "retry")
             if page.status == "more":
                 next_cursor = cursor
             else:
@@ -263,6 +303,9 @@ class ResearchStory:
                 error.message if error is not None else None,
                 error.code if error is not None else None,
                 error.retry_after_seconds if error is not None else None,
+                "chat_history" if page.use_history else "reply_thread", page.stop_reason, page.rows_scanned,
+                page.offset_id if next_cursor or retry_cursor else None,
+                error,
             ),
             follow_up,
             state.parent_error,

@@ -169,7 +169,14 @@ class ResearchProtocolTests(IsolatedAsyncioTestCase):
         self.assertEqual(result.next_offset_id, 90)
         self.assertEqual(result.status, "more")
         self.assertFalse(result.use_history)
+        self.assertEqual(result.rows_scanned, 4)
         self.assertIsInstance(self.client.await_args.args[0], functions.messages.GetRepliesRequest)
+
+    async def test_repeated_history_page_cannot_establish_completion(self) -> None:
+        self.client.return_value = SimpleNamespace(messages=[self.message(100)])
+        with self.assertRaises(TelegramSearchError) as stalled:
+            await self.backend.get_story_replies(self.chat_id, 50, limit=3, offset_id=100, use_history=True)
+        self.assertEqual(stalled.exception.code, "stalled_offset")
 
     async def test_unsupported_replies_checkpoint_each_sparse_history_page(self) -> None:
         self.client.side_effect = [

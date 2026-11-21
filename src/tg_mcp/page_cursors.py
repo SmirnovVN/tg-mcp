@@ -6,6 +6,8 @@ from secrets import token_urlsafe
 from time import monotonic
 from typing import Generic, TypeVar
 
+from .diagnostics import log_cursor
+
 Page = TypeVar("Page")
 
 
@@ -30,7 +32,7 @@ class CursorPages(Generic[Page]):
         self._capacity = capacity
         self._ttl = ttl
 
-    def add(self, load: Callable[[], Awaitable[Page]]) -> str:
+    def add(self, load: Callable[[], Awaitable[Page]], *, kind: str = "next") -> str:
         now = monotonic()
         for cursor in [key for key, entry in self._entries.items() if entry.expires_at <= now]:
             del self._entries[cursor]
@@ -38,9 +40,11 @@ class CursorPages(Generic[Page]):
             self._entries.popitem(last=False)
         cursor = token_urlsafe(24)
         self._entries[cursor] = _Entry(now + self._ttl, load)
+        log_cursor("created", cursor, kind)
         return cursor
 
     async def get(self, cursor: str) -> Page:
+        log_cursor("used", cursor)
         entry = self._entries.get(cursor)
         if entry is None or entry.expires_at <= monotonic():
             self._entries.pop(cursor, None)

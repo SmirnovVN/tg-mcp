@@ -1,7 +1,8 @@
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
+from secrets import token_hex
 from typing import TypeVar
 
 from .page_cursors import CursorPages
@@ -33,6 +34,8 @@ class SearchIssue:
     code: str
     message: str
     retry_after_seconds: int | None = None
+    stream_id: str = ""
+    inherited: bool = False
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,7 @@ class MultiSearchResult:
     partial: bool
     next_cursor: str | None
     retry_cursor: str | None
+    completed_stream_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,7 @@ class _Stream:
     hits: tuple[RichMessage, ...] = ()
     exhausted: bool = False
     oldest: tuple[datetime, int] | None = None
+    recovery_id: str | None = None
 
 
 def _message_order(hit: RichMessage) -> tuple[datetime, int]:
@@ -174,6 +179,7 @@ class MultiSearch:
     ) -> MultiSearchResult:
         active = dict(enumerate(streams))
         failed: list[_Stream] = []
+        completed: list[str] = []
         errors = list(earlier_errors)
         hits: list[MultiSearchHit] = []
         budget = len(streams) + 16
@@ -181,9 +187,15 @@ class MultiSearch:
         deadline = loop.time() + PAGE_TIMEOUT
 
         def record_failure(stream: _Stream, issue: SearchIssue) -> None:
-            errors.append(issue)
+            stream_id = stream.recovery_id or token_hex(8)
+            errors.append(replace(issue, stream_id=stream_id))
             if issue.code not in _TERMINAL_ERRORS:
-                failed.append(stream)
+                failed.append(replace(stream, recovery_id=stream_id))
+
+        def finish(index: int) -> None:
+            stream = active.pop(index)
+            if stream.recovery_id is not None:
+                completed.append(stream.recovery_id)
 
         # The Telegram history anchor depends on the chat and date, not the phrase.
         unprepared = tuple(dict.fromkeys(
@@ -204,7 +216,7 @@ class MultiSearch:
                 ))
                 del active[index]
             elif start is None:
-                del active[index]
+                finish(index)
             else:
                 active[index] = replace(stream, offset=start)
 
@@ -220,7 +232,7 @@ class MultiSearch:
                     if isinstance(result, SearchIssue):
                         record_failure(active.pop(index), result)
                     elif result.exhausted and not result.hits:
-                        del active[index]
+                        finish(index)
                     else:
                         active[index] = result
                 continue
@@ -235,18 +247,19 @@ class MultiSearch:
                     continue
                 matches[stream.query] = _match_source(head, stream.query)
                 if len(stream.hits) == 1 and stream.exhausted:
-                    del active[index]
+                    finish(index)
                 else:
                     active[index] = replace(stream, hits=stream.hits[1:])
             hits.append(_make_hit(message, winner.chat, matches, filters.max_text_chars))
 
         remaining = tuple(active.values())
-        error_snapshot = tuple(errors)
+        error_snapshot = tuple(replace(issue, inherited=True) for issue in errors)
         retry = tuple(failed)
         return MultiSearchResult(
             hits=hits,
             errors=errors,
             partial=bool(errors),
             next_cursor=self._pages.add(lambda: self._page(filters, remaining, error_snapshot)) if remaining else None,
-            retry_cursor=self._pages.add(lambda: self._page(filters, retry)) if retry else None,
+            retry_cursor=self._pages.add(lambda: self._page(filters, retry), kind="retry") if retry else None,
+            completed_stream_ids=completed,
         )

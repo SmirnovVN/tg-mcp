@@ -53,7 +53,7 @@ class ConfigTests(TestCase):
                     with (
                         chdir(cwd),
                         patch("sys.argv", ["tg-mcp", *args]),
-                        patch("tg_mcp.telegram_session.TelegramClient", return_value=client),
+                        patch("tg_mcp.telegram_session.SessionClient", return_value=client),
                         patch("tg_mcp.server.serve_http", side_effect=serve_while_locked) as serve,
                     ):
                         main()
@@ -123,7 +123,7 @@ class ServerTests(IsolatedAsyncioTestCase):
         client = AsyncMock()
         client.get_me.return_value = None
         with (
-            patch("tg_mcp.telegram_session.TelegramClient", return_value=client),
+            patch("tg_mcp.telegram_session.SessionClient", return_value=client),
             patch("tg_mcp.server.serve_http") as serve,
             self.assertRaisesRegex(ConfigurationError, "A Telegram user session is required"),
         ):

@@ -19,6 +19,11 @@ class TelegramSearchError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.retry_after_seconds = retry_after_seconds
+        self.retry_cursor: str | None = None
+
+    @property
+    def retryable(self) -> bool:
+        return self.code in {"rate_limited", "timeout", "telegram_error"}
 
 
 @dataclass(frozen=True)
@@ -78,6 +83,7 @@ class ReplyPage:
     next_offset_id: int | None
     use_history: bool
     status: str
+    rows_scanned: int = 0
 
 
 class TelegramSearch:
@@ -468,11 +474,13 @@ async def _reply_page(
         key=lambda row: row.id, reverse=True,
     )
     if not rows:
+        if offset and any(row.id > 0 for row in raw_rows):
+            raise TelegramSearchError("Telegram returned replies without advancing the cursor.", code="stalled_offset")
         return ReplyPage([], None, history, "complete")
     hits: list[RichMessage] = []
-    for row in rows:
+    for inspected, row in enumerate(rows, 1):
         if row.id <= message_id:
-            return ReplyPage(hits, None, history, "complete")
+            return ReplyPage(hits, None, history, "complete", inspected)
         if not isinstance(row, types.Message) or row.peer_id is None:
             continue
         if utils.get_peer_id(row.peer_id) != chat_id:
@@ -485,6 +493,6 @@ async def _reply_page(
         if hits and hits[-1].message_id == row.id:
             continue
         if len(hits) == limit:
-            return ReplyPage(hits, hits[-1].message_id, history, "more")
+            return ReplyPage(hits, hits[-1].message_id, history, "more", inspected)
         hits.append(_rich_message(row, peer))
-    return ReplyPage(hits, rows[-1].id, history, "more")
+    return ReplyPage(hits, rows[-1].id, history, "more", len(rows))
